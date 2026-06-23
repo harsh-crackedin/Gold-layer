@@ -175,7 +175,7 @@ self-reported weaknesses
 recent focus areas
 ```
 
-MemZero must not own:
+MemZero must not own: 
 
 ```text
 accepted submissions

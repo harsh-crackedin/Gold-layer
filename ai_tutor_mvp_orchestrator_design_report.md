@@ -189,12 +189,6 @@ streaks
 
 PostgreSQL remains canonical truth. MemZero is semantic personalization recall.
 
-### 2.7 Discard SQLite completely
-
-The MVP must not use SQLite for runtime data, retrieval, progress tracking, content retrieval, user memory, or student modeling.
-
-Future RAG should use PostgreSQL-native tables such as `knowledge_sources` and `knowledge_chunks`, with PostgreSQL FTS and optionally pgvector. That is not required for the first MVP.
-
 ---
 
 ## 3. Tables Reused in MVP

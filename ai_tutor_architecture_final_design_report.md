@@ -1,7 +1,7 @@
 # AI Tutor Architecture Final Design Report
 
 **Project:** Crackedin Labs AI Tutor / Creator Platform  
-**Scope:** Tutor Domain Model, Student Model, and Tutor Orchestrator Layer  
+**Scope:** Skill Graph, Learner Skill Graph, and Tutor Orchestrator Layer  
 **Runtime database decision:** PostgreSQL only  
 **Repository status:** historical/outdated implementation; not authoritative for this design  
 **Excluded for this phase:** production-support tables, data-population workflows, content-ingestion workflows, compliance, moderation, and safety layers
@@ -14,7 +14,7 @@ The final architecture should be an **orchestrator-led adaptive tutoring system*
 
 ```text
 User request
-  -> Intent + topic + domain resolution
+  -> Intent + skill + domain resolution
   -> DomainService builds DomainContext
   -> StudentModelService builds StudentSnapshot
   -> UserMemoryService builds UserMemorySnapshot when personalization is enabled
@@ -26,7 +26,7 @@ User request
 ```
 
 The source documents already agree on the key shift: the old chat flow is LLM-led, while the target flow is `DomainContext + StudentSnapshot -> TutorPlan -> LLM response -> events -> projections`.
-The unified report explicitly frames the tutor as using the user message, domain/topic, prerequisites, known learning state, solved/attempted/verified history, curriculum context, coding evidence, and future evidence from chat/labs/checkpoints/interview practice. fileciteturn22file2
+The unified report explicitly frames the tutor as using the user message, domain/skill, prerequisites, known learning state, solved/attempted/verified history, curriculum context, coding evidence, and future evidence from chat/labs/checkpoints/interview practice. fileciteturn22file2
 
 The final design keeps the strongest source-doc ideas:
 
@@ -37,9 +37,31 @@ The final design keeps the strongest source-doc ideas:
 - Mem0/MemZero is optional semantic memory for personalization, not canonical learning truth.
 - Exposure is not mastery; self-report is low-confidence; independent solving must be separated from assisted solving.
 
-The final design **replaces the older 7-table-only recommendation with a production-ready 13-table tutor core**. The original 7 tables are still the minimum kernel, but production-quality topic resolution, item retrieval, grounded response generation, and Mem0 personalization require six additional tables that are directly part of the domain or student model, not production-support infrastructure.
+The final design **replaces the older 7-table-only recommendation with a production-ready 13-table tutor core**. The original 7 tables are still the minimum kernel, but production-quality skill resolution, item retrieval, grounded response generation, and Mem0 personalization require six additional tables that are directly part of the domain or student model, not production-support infrastructure.
 
 Source set reconciled: PostgreSQL table reference fileciteturn19file0, unified tutor report fileciteturn19file1, and MemZero/Mem0 integration report fileciteturn19file2.
+
+### 1.1 Naming Update: Skill Graph and Learner Skill Graph
+
+This version replaces the legacy `pt_*` naming family with a clearer production vocabulary:
+
+| Old naming | New naming | Meaning |
+|---|---|---|
+| `app.pt_areas` | `app.skill_areas` | Global high-level skill domains. |
+| `app.pt_topics` | `app.skills` | Canonical skill/concept nodes in the Skill Graph. |
+| `app.pt_topic_aliases` | `app.skill_aliases` | Aliases, synonyms, abbreviations, and common phrases for skill resolution. |
+| `app.pt_concept_relationships` | `app.skill_relationships` | Prerequisite, related, unlock, contrast, and confusion edges between skills. |
+| `app.learning_item_topics` | `app.learning_item_skills` | Many-to-many mapping between learning items and skills. |
+| `app.user_topic_state` | `app.learner_skill_state` | User-specific projected state for each skill. |
+
+Terminology rule:
+
+```text
+Skill Graph = global/shared curriculum graph.
+Learner Skill Graph = user-specific evidence and projections over that graph.
+```
+
+The product UI may still use the word “topic” where it is natural for users, but the backend schema and architecture should use **skill** as the canonical unit. A skill can represent a concept, subtopic, module, case, checkpoint, pattern, technique, or practical competency.
 
 ---
 
@@ -51,7 +73,7 @@ The source documents converge on five durable architecture principles.
 
 First, PostgreSQL is the production runtime source of truth. The table-reference document says PostgreSQL is the runtime source of truth and SQLite should not be used by the production tutor runtime. fileciteturn22file4 The unified architecture report says the production tutor should read and write PostgreSQL only. fileciteturn22file2
 
-Second, the tutor must move from an LLM-led flow to an orchestrator-led flow. The unified report identifies the target pipeline as topic/domain resolution, DomainService, StudentModelService, TutorOrchestrator, LLM response, extractor, and projectors. fileciteturn21file13
+Second, the tutor must move from an LLM-led flow to an orchestrator-led flow. The unified report identifies the target pipeline as skill/domain resolution, DomainService, StudentModelService, TutorOrchestrator, LLM response, extractor, and projectors. fileciteturn21file13
 
 Third, chat tables remain raw conversation storage. The table-reference report states that chat messages should store the raw conversation while learning events and projection tables store structured progress. fileciteturn22file10
 
@@ -65,9 +87,9 @@ Fifth, Mem0/MemZero must not become the tutor brain. The MemZero report says Pos
 |---|---|---|
 | Runtime database | Source docs already say PostgreSQL-only and no SQLite runtime. | Keep PostgreSQL-only. Do not include SQLite in runtime diagrams or implementation plans. |
 | Repository | Earlier chat inspected repo, but user corrected that it is outdated. | Repository is historical only. It should not drive table names, service shape, or runtime architecture. |
-| 7 tables vs production completeness | Source docs recommend 7 new tutor tables. | Keep the 7 as the minimum kernel, but add 6 direct tutor-model tables: topic aliases, item-topic mapping, knowledge sources, knowledge chunks, user context events, user profile summary. |
-| Mem0 table timing | MemZero report says `user_context_events` and `user_profile_summary` are later-stage. | Promote both into the production-ready Student Model because personalization is an explicit product requirement. |
-| `learning_items.topic_ids_json` vs join table | Source docs defer `learning_item_topic_map`. | Replace JSON-only mapping with normalized `learning_item_topics`. Multi-topic item retrieval directly affects tutor quality and performance. |
+| 7 tables vs production completeness | Source docs recommend 7 new tutor tables. | Keep the 7 as the minimum kernel, but add 6 direct tutor-model tables: skill aliases, item-skill mapping, knowledge sources, knowledge chunks, user context events, user profile summary. |
+| Mem0 table timing | MemZero report says `user_context_events` and `user_profile_summary` are later-stage. | Promote both into the production-ready Learner Skill Graph because personalization is an explicit product requirement. |
+| `learning_items.skill_ids_json` vs join table | Source docs defer `learning_item_skill_map`. | Replace JSON-only mapping with normalized `learning_item_skills`. Multi-skill item retrieval directly affects tutor quality and performance. |
 | Knowledge/RAG tables | Source docs mention knowledge chunks only as future migration. | Add a minimal `knowledge_sources` + `knowledge_chunks` pair now because grounded retrieval is directly tied to response quality. Data ingestion remains out of scope. |
 
 ---
@@ -75,13 +97,13 @@ Fifth, Mem0/MemZero must not become the tutor brain. The MemZero report says Pos
 ## 3. Final Architecture Principles
 
 1. **The platform owns pedagogy; the LLM owns language.** The LLM can classify, explain, generate questions, and summarize, but the platform owns prerequisites, current state, verified status, help-level interpretation, and event projection.
-2. **Domain truth is stable and canonical.** Topics, aliases, prerequisites, content chunks, and learning items live in PostgreSQL under a stable domain model.
-3. **Student truth is evidence-based.** `learning_events` records what happened; `user_topic_state` and `user_learning_item_state` summarize current state for fast reads.
+2. **Domain truth is stable and canonical.** Skills, aliases, prerequisites, content chunks, and learning items live in PostgreSQL under a stable domain model.
+3. **Student truth is evidence-based.** `learning_events` records what happened; `learner_skill_state` and `user_learning_item_state` summarize current state for fast reads.
 4. **TutorPlan is ephemeral.** It is created per turn and used to control response strategy; it should not be persisted as a primary product table.
 5. **Mem0 is a personalization accelerator, not a truth system.** Mem0 can retrieve preferences, goals, interests, and prior context. It cannot certify mastery.
 6. **Verification requires performance evidence.** `seen`, `taught`, and `self_reported_known` are not enough for `verified`.
 7. **Independent work and assisted work are different states.** The help-level model must be included in item-state and learning-event logic. The table reference explicitly defines help levels 0 through 5 and states that solving after the full answer should not count as independent verification. fileciteturn21file2
-8. **Retrieval is a first-class tutor function.** Domain retrieval is not just “search docs.” It must retrieve topic graph, prerequisites, examples, learning items, prior student evidence, and grounded content.
+8. **Retrieval is a first-class tutor function.** Domain retrieval is not just “search docs.” It must retrieve skill graph, prerequisites, examples, learning items, prior student evidence, and grounded content.
 9. **Scores must be interpretable before they become predictive.** V1 should use transparent readiness/coverage/confidence rules inspired by knowledge tracing, not opaque ML-only mastery predictions.
 
 ---
@@ -90,22 +112,22 @@ Fifth, Mem0/MemZero must not become the tutor brain. The MemZero report says Pos
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│  Layer 1: Tutor Domain Model                                │
-│  Areas, topics, aliases, concept relationships, learning     │
-│  items, item-topic mapping, knowledge sources/chunks         │
+│  Layer 1: Skill Graph                                      │
+│  Skill areas, skills, aliases, relationships, learning      │
+│  items, item-skill mapping, knowledge sources/chunks        │
 └─────────────────────────────────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  Layer 2: Student Model                                      │
-│  Learning events, topic state, item state, coding evidence,  │
-│  prep-plan context, user context events, profile summary     │
+│  Layer 2: Learner Skill Graph                            │
+│  Learning events, learner skill state, item state, coding   │
+│  evidence, prep-plan context, user context, profile summary │
 └─────────────────────────────────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Layer 3: Tutor Orchestrator                                 │
-│  Intent/topic resolution, DomainContext, StudentSnapshot,    │
+│  Intent/skill resolution, DomainContext, StudentSnapshot,    │
 │  UserMemorySnapshot, TutorPlan, retrieval contract,          │
 │  response contract, extraction contract                      │
 └─────────────────────────────────────────────────────────────┘
@@ -154,52 +176,52 @@ The older source recommendation was exactly 7 new tables. fileciteturn22fi
 
 | # | Table | Layer | Why it is required |
 |---:|---|---|---|
-| 1 | `app.pt_areas` | Domain | Canonical high-level domains. |
-| 2 | `app.pt_topics` | Domain | Canonical topics, skills, modules, cases, and subtopics. |
-| 3 | `app.pt_topic_aliases` | Domain | Production-grade topic resolution, synonym handling, ambiguity handling. |
-| 4 | `app.pt_concept_relationships` | Domain | Prerequisites, related concepts, unlocks, contrasts. |
+| 1 | `app.skill_areas` | Domain | Canonical high-level domains. |
+| 2 | `app.skills` | Domain | Canonical concepts, skills, modules, cases, and subskills/subtopics. |
+| 3 | `app.skill_aliases` | Domain | Production-grade skill resolution, synonym handling, ambiguity handling. |
+| 4 | `app.skill_relationships` | Domain | Prerequisites, related concepts, unlocks, contrasts. |
 | 5 | `app.learning_items` | Domain/Student bridge | Universal learn/practice/verify item catalog. |
-| 6 | `app.learning_item_topics` | Domain/Student bridge | Normalized multi-topic item mapping and relevance weighting. |
+| 6 | `app.learning_item_skills` | Domain/Student bridge | Normalized multi-skill item mapping and relevance weighting. |
 | 7 | `app.knowledge_sources` | Domain/Retrieval | Canonical source metadata for grounded tutor content. |
 | 8 | `app.knowledge_chunks` | Domain/Retrieval | Retrieval units for grounded explanations and examples. |
 | 9 | `app.learning_events` | Student | Append-only learning evidence. |
-| 10 | `app.user_topic_state` | Student | Fast topic-level learner state projection. |
+| 10 | `app.learner_skill_state` | Student | Fast skill-level learner state projection. |
 | 11 | `app.user_learning_item_state` | Student | Fast item-level learner state projection. |
 | 12 | `app.user_context_events` | Student personalization | Durable preference/goal/context evidence. |
 | 13 | `app.user_profile_summary` | Student personalization | Fast current personalization snapshot for orchestrator prompts. |
 
 ### 6.2 Why the final design exceeds the 7-table foundation
 
-The 7-table set is an excellent prototype foundation, but production creates four additional needs:
+The 7-table Skill Graph foundation is an excellent prototype foundation, but production creates four additional needs:
 
-1. **Topic resolution needs aliases.** Without `pt_topic_aliases`, the system must rely too heavily on LLM inference or loose string matching for phrases like “locks,” “mutex,” “deadlock,” “transaction deadlock,” “rate limiter,” “token bucket,” and company/framework abbreviations.
-2. **Learning items are many-to-many.** A coding problem, diagnostic, or system-design case often maps to multiple topics. A JSON list can work briefly, but a normalized `learning_item_topics` table improves retrieval precision, weighting, referential integrity, and maintainability.
+1. **Skill resolution needs aliases.** Without `skill_aliases`, the system must rely too heavily on LLM inference or loose string matching for phrases like “locks,” “mutex,” “deadlock,” “transaction deadlock,” “rate limiter,” “token bucket,” and company/framework abbreviations.
+2. **Learning items are many-to-many.** A coding problem, diagnostic, or system-design case often maps to multiple skills. A JSON list can work briefly, but a normalized `learning_item_skills` table improves retrieval precision, weighting, referential integrity, and maintainability.
 3. **Grounded response generation needs content retrieval.** `knowledge_sources` and `knowledge_chunks` are the minimum PostgreSQL-only replacement for runtime content retrieval. This does not imply any content-ingestion workflow in scope.
 4. **Mem0 personalization needs Postgres truth.** The MemZero report already says Mem0 should not be the canonical brain and recommends `user_context_events` plus `user_profile_summary`; this final design promotes them because personalization is core to tutor quality. fileciteturn22file18
 
 ---
 
-## 7. Tutor Domain Model
+## 7. Skill Graph
 
 ### 7.1 Responsibilities
 
-The Domain Model answers:
+The Skill Graph answers:
 
 ```text
 What domain is this request in?
-What topic is being discussed?
+What skill is being discussed?
 What aliases or ambiguous meanings apply?
-What prerequisites does this topic require?
-What related or often-confused topics matter?
-What learning items can teach, practice, or verify this topic?
+What prerequisites does this skill require?
+What related or often-confused skills matter?
+What learning items can teach, practice, or verify this skill?
 What grounded content should support the response?
 ```
 
-The table-reference source already identifies `pt_concept_relationships` as the mechanism for prerequisites, related concepts, unlocks, and prerequisite repair. fileciteturn21file12 The final design keeps that, but strengthens topic resolution and retrieval.
+The table-reference source already identifies `skill_relationships` as the mechanism for prerequisites, related concepts, unlocks, and prerequisite repair. fileciteturn21file12 The final design keeps that, but strengthens skill resolution and retrieval.
 
 ### 7.2 Core domain objects
 
-#### `Area`
+#### `SkillArea`
 
 High-level domain: DSA, system design, operating systems, databases, SQL, networking, distributed systems, backend, data engineering, cloud, debugging, tools, and future domains.
 
@@ -214,9 +236,9 @@ is_active
 metadata_json
 ```
 
-#### `Topic`
+#### `Skill`
 
-Canonical curriculum node. A topic can be a module, concept, subtopic, skill, case, checkpoint, or assessment anchor. Use `parent_topic_id` for hierarchy. Do not create a separate subtopics table.
+Canonical Skill Graph node. A skill can be a module, concept, subskill/subtopic, competency, case, checkpoint, or assessment anchor. Use `parent_skill_id` for hierarchy. Do not create a separate subskills/subtopics table.
 
 Required semantics:
 
@@ -226,35 +248,35 @@ area_id / area_slug
 slug
 name
 description
-parent_topic_id
-topic_type
+parent_skill_id
+skill_type
 difficulty
 is_active
 metadata_json
 ```
 
-Recommended `topic_type` values:
+Recommended `skill_type` values:
 
 ```text
 module
 concept
-subtopic
-skill
+subskill
+competency
 case
 checkpoint
 pattern
 technique
 ```
 
-#### `TopicAlias`
+#### `SkillAlias`
 
-Production topic resolution requires aliases. This table maps user language to canonical topics.
+Production skill resolution requires aliases. This table maps user language to canonical skills.
 
 Required semantics:
 
 ```text
 id
-topic_id
+skill_id
 alias
 alias_type        -- synonym, abbreviation, common_phrase, company_phrase, misspelling
 language
@@ -265,23 +287,23 @@ metadata_json
 
 Examples:
 
-| Alias | Canonical topic | Notes |
+| Alias | Canonical skill | Notes |
 |---|---|---|
 | `mutex` | OS locks / mutual exclusion | Could be OS or language-specific; allow ambiguity. |
 | `db deadlock` | database transaction deadlocks | Distinguish from OS deadlock. |
-| `token bucket` | rate limiting/token bucket | Subtopic under rate limiting. |
+| `token bucket` | rate limiting/token bucket | Subskill/subtopic under rate limiting. |
 | `lc graph bfs` | BFS graph traversal | DSA alias. |
 
-#### `ConceptRelationship`
+#### `SkillRelationship`
 
-Relationships between topics. Start with `requires`, `related_to`, `part_of`, `contrasts_with`, and `often_confused_with`.
+Relationships between skills. Start with `requires`, `related_to`, `part_of`, `contrasts_with`, and `often_confused_with`.
 
 Required semantics:
 
 ```text
 id
-source_topic_id
-target_topic_id
+source_skill_id
+target_skill_id
 relationship_type
 weight
 metadata_json
@@ -291,12 +313,12 @@ Recommended interpretation:
 
 | Relationship | Meaning for orchestrator |
 |---|---|
-| `requires` | Must be known before target topic is taught deeply. |
-| `part_of` | Target is inside a larger topic or module. |
+| `requires` | Must be known before target skill is taught deeply. |
+| `part_of` | Target skill is inside a larger skill or module. |
 | `related_to` | Useful context, not a prerequisite. |
 | `contrasts_with` | Useful for comparison questions. |
 | `often_confused_with` | Useful for misconception correction. |
-| `unlocks` | Useful for next-topic recommendations. |
+| `unlocks` | Useful for next-skill recommendations. |
 
 #### `LearningItem`
 
@@ -307,7 +329,7 @@ Required semantics:
 ```text
 id
 area_id / area_slug
-primary_topic_id
+primary_skill_id
 item_type
 title
 difficulty
@@ -347,21 +369,21 @@ rubric_eval
 mock_interview
 ```
 
-#### `LearningItemTopic`
+#### `LearningItemSkill`
 
-Normalized many-to-many mapping.
+Normalized many-to-many skill mapping.
 
 Required semantics:
 
 ```text
 learning_item_id
-topic_id
+skill_id
 role              -- primary, secondary, prerequisite, misconception_target, extension
 relevance_weight
 metadata_json
 ```
 
-This replaces `topic_ids_json` as the primary retrieval mechanism. `learning_items.primary_topic_id` can remain for fast default routing.
+This replaces `skill_ids_json` as the primary retrieval mechanism. `learning_items.primary_skill_id` can remain for fast default routing.
 
 #### `KnowledgeSource` and `KnowledgeChunk`
 
@@ -376,7 +398,7 @@ publisher
 title
 url
 area_id / area_slug
-primary_topic_id
+primary_skill_id
 metadata_json
 is_active
 ```
@@ -386,7 +408,7 @@ is_active
 ```text
 id
 source_id
-topic_id nullable
+skill_id nullable
 area_id / area_slug
 chunk_type        -- explanation, example, tradeoff, pitfall, rubric, question, answer
 content
@@ -396,39 +418,39 @@ metadata_json
 is_active
 ```
 
-The key decision is not ingestion; it is runtime shape. The tutor needs a compact, topic-addressable, PostgreSQL-native retrieval surface.
+The key decision is not ingestion; it is runtime shape. The tutor needs a compact, skill-addressable, PostgreSQL-native retrieval surface.
 
 ---
 
-## 8. Student Model
+## 8. Learner Skill Graph
 
 ### 8.1 Responsibilities
 
-The Student Model answers:
+The Learner Skill Graph answers:
 
 ```text
 What does this user currently know?
 What have they seen, practiced, solved, or failed?
 What was independent vs assisted?
 What prerequisites are missing or weak?
-What topics/items are due for review?
+What skills/items are due for review?
 What confidence do we have in the state?
 What personal context should influence response style or strategy?
 ```
 
-The unified report emphasizes that the Student Model must know whether the user has seen, practiced, demonstrated mastery, struggled, become stale, solved independently, or solved with help. It also states the key rule: `seen != understood`, `taught != verified`, `self_reported_known != verified`, and solving after a full solution is not independent. fileciteturn21file10
+The unified report emphasizes that the Learner Skill Graph must know whether the user has seen, practiced, demonstrated mastery, struggled, become stale, solved independently, or solved with help. It also states the key rule: `seen != understood`, `taught != verified`, `self_reported_known != verified`, and solving after a full solution is not independent. fileciteturn21file10
 
 ### 8.2 Evidence-first model
 
-The Student Model is not a single mutable score. It has three layers:
+The Learner Skill Graph is not a single mutable score. It has three layers:
 
 ```text
 Raw evidence:      learning_events, coding submissions, chat evidence references
-Current state:     user_topic_state, user_learning_item_state
+Current state:     learner_skill_state, user_learning_item_state
 Personal context:  user_context_events, user_profile_summary, optional Mem0 recall
 ```
 
-The table-reference source already defines this event/projection split: `learning_events` is raw evidence, while `user_topic_state` and `user_learning_item_state` are fast current projections. fileciteturn21file14
+The table-reference source already defines this event/projection split: `learning_events` is raw evidence, while `learner_skill_state` and `user_learning_item_state` are fast current projections. fileciteturn21file14
 
 ### 8.3 `learning_events`
 
@@ -442,7 +464,7 @@ user_id
 session_id
 message_id
 area_id / area_slug
-topic_id
+skill_id
 learning_item_id
 event_type
 source
@@ -493,15 +515,15 @@ Event interpretation:
 | `coding_submission_accepted` | Medium/high | High for coding item | Can verify with help level 0-1. |
 | `solution_revealed` | None | Blocks independent verification for that attempt | No verification. |
 
-### 8.4 `user_topic_state`
+### 8.4 `learner_skill_state`
 
-`user_topic_state` is the fast-read topic projection.
+`learner_skill_state` is the fast-read skill projection.
 
 Recommended fields:
 
 ```text
 user_id
-topic_id
+skill_id
 status
 coverage_score
 readiness_score
@@ -533,7 +555,7 @@ verified
 stale
 ```
 
-The table reference says `user_topic_state` is a projection, should be updated from learning events and other trusted evidence, and should be read before deciding whether to explain, probe prerequisites, repair prerequisites, or assess. fileciteturn21file16
+The table reference says `learner_skill_state` is a projection, should be updated from learning events and other trusted evidence, and should be read before deciding whether to explain, probe prerequisites, repair prerequisites, or assess. fileciteturn21file16
 
 ### 8.5 `user_learning_item_state`
 
@@ -617,7 +639,7 @@ Do not collapse these into one “mastery score.” A user can have high coverag
 
 The production V1 should use an **interpretable knowledge-tracing-inspired heuristic**, not a black-box deep knowledge tracing model. The reason is practical: the product needs predictable state transitions before it has enough high-quality interaction data to train or calibrate a neural learner model.
 
-Knowledge tracing is the right research family: Corbett and Anderson’s classic knowledge-tracing work modeled changing student knowledge states during skill acquisition. citeturn534038search6 Deep Knowledge Tracing later showed that recurrent neural networks can improve prediction performance and infer structure from student-task sequences, but that is a later-stage modeling path after sufficient interaction data exists. citeturn460086academia49 DAS3H is especially relevant for future versions because it models both learning and forgetting across multi-skill-tagged items, which fits coding problems and multi-topic system-design tasks. citeturn460086academia48
+Knowledge tracing is the right research family: Corbett and Anderson’s classic knowledge-tracing work modeled changing student knowledge states during skill acquisition. citeturn534038search6 Deep Knowledge Tracing later showed that recurrent neural networks can improve prediction performance and infer structure from student-task sequences, but that is a later-stage modeling path after sufficient interaction data exists. citeturn460086academia49 DAS3H is especially relevant for future versions because it models both learning and forgetting across multi-skill-tagged items, which fits coding problems and multi-skill system-design tasks. citeturn460086academia48
 
 V1 formula direction:
 
@@ -643,7 +665,7 @@ help_level 5: 0.00 for independent verification
 
 ### 8.8 Review and forgetting
 
-Keep `next_review_at` in both `user_topic_state` and `user_learning_item_state`. Retrieval practice and distributed practice should influence review scheduling. Karpicke and Roediger’s retrieval-practice work shows that spacing and retrieval affect retention, and DAS3H specifically models learning and forgetting for optimally scheduled distributed practice across skills. citeturn254500search4turn460086academia48
+Keep `next_review_at` in both `learner_skill_state` and `user_learning_item_state`. Retrieval practice and distributed practice should influence review scheduling. Karpicke and Roediger’s retrieval-practice work shows that spacing and retrieval affect retention, and DAS3H specifically models learning and forgetting for optimally scheduled distributed practice across skills. citeturn254500search4turn460086academia48
 
 Production implication:
 
@@ -686,7 +708,7 @@ The MemZero report lists exactly these kinds of memories: style preference, exam
 Mem0 cannot certify:
 
 ```text
-verified topic mastery
+verified skill mastery
 readiness score
 solved independently
 attempt count
@@ -695,7 +717,7 @@ curriculum prerequisite truth
 prep-plan progress
 ```
 
-The MemZero report explicitly maps those facts to `user_topic_state`, `user_learning_item_state`, `learning_events`, coding submissions, prep progress, and topic/domain tables, not Mem0. fileciteturn22file7
+The MemZero report explicitly maps those facts to `learner_skill_state`, `user_learning_item_state`, `learning_events`, coding submissions, prep progress, and skill/domain tables, not Mem0. fileciteturn22file7
 
 ### 9.4 Required Postgres memory tables
 
@@ -716,7 +738,7 @@ memory_text
 normalized_key
 normalized_value_json
 domain
- topic_id
+ skill_id
 confidence
 source
 actionability
@@ -748,7 +770,7 @@ context_observed
 context_invalidated
 ```
 
-The MemZero design already defines `user_context_events` as the append-only event ledger for non-mastery user context and lists fields such as context category, memory text, normalized key/value, domain, topic, confidence, actionability, validity, and MemZero memory ID. fileciteturn22file11
+The MemZero design already defines `user_context_events` as the append-only event ledger for non-mastery user context and lists fields such as context category, memory text, normalized key/value, domain, skill, confidence, actionability, validity, and MemZero memory ID. fileciteturn22file11
 
 #### `app.user_profile_summary`
 
@@ -821,14 +843,14 @@ The TutorOrchestrator is the decision-making layer. It answers:
 
 ```text
 What is the user trying to do?
-What domain/topic is involved?
-Is the user ready for this topic?
+What domain/skill is involved?
+Is the user ready for this skill?
 Should the tutor explain, probe, repair, guide, quiz, review, or create practice?
 What domain context, student context, memory context, and retrieval context should the LLM receive?
 What learning events should the extractor look for after the turn?
 ```
 
-The unified report states that the LLM can help with intent classification, topic mapping, natural-language explanation, diagnostic generation, and summarization, but the platform must own mastery updates, readiness, prerequisites, verified status, long-term learner state, and projection logic. fileciteturn21file13
+The unified report states that the LLM can help with intent classification, skill mapping, natural-language explanation, diagnostic generation, and summarization, but the platform must own mastery updates, readiness, prerequisites, verified status, long-term learner state, and projection logic. fileciteturn21file13
 
 ### 10.2 Runtime objects
 
@@ -848,14 +870,14 @@ product_mode
 
 ```text
 area
-target_topic
-resolved_topic_id
+target_skill
+resolved_skill_id
 resolution_confidence
 ambiguity_candidates
-parent_topics
-prerequisite_topics
-related_topics
-often_confused_topics
+parent_skills
+prerequisite_skills
+related_skills
+often_confused_skills
 learning_items
 knowledge_chunks
 retrieval_notes
@@ -865,7 +887,7 @@ retrieval_notes
 
 ```text
 user_id
-target_topic_state
+target_skill_state
 prerequisite_states
 relevant_item_states
 recent_learning_events
@@ -898,7 +920,7 @@ memory_confidence
 intent
 strategy
 area
-target_topic_id
+target_skill_id
 student_level_assumption
 prerequisite_action
 retrieval_contract
@@ -959,12 +981,12 @@ creator_generation
 
 | Situation | Strategy |
 |---|---|
-| Topic clear, prerequisites verified, no active struggle | `direct_explanation` or `retrieval_grounded_answer` |
-| Topic clear, prerequisites unknown | `scaffolded_explanation` with one light probe |
+| Skill clear, prerequisites verified, no active struggle | `direct_explanation` or `retrieval_grounded_answer` |
+| Skill clear, prerequisites unknown | `scaffolded_explanation` with one light probe |
 | Required prerequisite weak or missing | `prerequisite_repair` |
 | User solving a problem | `socratic_guidance`; avoid full answer unless requested |
 | User asks for practice | `guided_practice` with appropriate item selection |
-| User is stale on a topic | `revision_or_spaced_repetition` |
+| User is stale on a skill | `revision_or_spaced_repetition` |
 | Misconception detected | `misconception_correction` |
 | User asks for a full system design case | `assessment_checkpoint` or `guided_practice` depending on state |
 | User asks to generate a diagnostic, quiz, or drill | `creator_generation` |
@@ -1006,12 +1028,12 @@ state_update_expectations = taught deadlock, seen prerequisites, maybe diagnosti
 The tutor should not send a vague query to a generic retriever and hope for the best. Retrieval must be constrained by DomainContext and StudentSnapshot.
 
 ```text
-1. Resolve area/topic using topics + aliases.
-2. Expand with prerequisites and related topics.
+1. Resolve area/skill using skills + aliases.
+2. Expand with prerequisites and related skills.
 3. Fetch user state for target/prerequisites/items.
-4. Fetch learning items through learning_item_topics.
-5. Fetch grounded knowledge chunks through topic filters + search.
-6. Rerank by topic match, intent match, item relevance, student state, and source fit.
+4. Fetch learning items through learning_item_skills.
+5. Fetch grounded knowledge chunks through skill filters + search.
+6. Rerank by skill match, intent match, item relevance, student state, and source fit.
 7. Pack only the minimum useful context into the prompt.
 ```
 
@@ -1020,22 +1042,22 @@ The tutor should not send a vague query to a generic retriever and hope for the 
 Use PostgreSQL-native capabilities:
 
 ```text
-Topic resolution:
+Skill resolution:
   - exact slug match
   - alias match
   - trigram similarity over aliases/titles
-  - optional embedding similarity over topic descriptions
+  - optional embedding similarity over skill descriptions
 
 Content retrieval:
-  - topic_id / area filters first
+  - skill_id / area filters first
   - full-text search over chunk content
   - optional pgvector similarity over chunk embeddings
   - hybrid lexical + semantic ranking
-  - rerank by intent, topic specificity, difficulty, and chunk_type
+  - rerank by intent, skill specificity, difficulty, and chunk_type
 
 Learning item retrieval:
-  - primary_topic_id exact match
-  - learning_item_topics many-to-many match
+  - primary_skill_id exact match
+  - learning_item_skills many-to-many match
   - item difficulty appropriate to StudentSnapshot
   - exclude stale/inactive items
   - prioritize verification_type based on strategy
@@ -1047,7 +1069,7 @@ RAG research supports evaluating retrieval on more than final-answer quality. RA
 
 ```text
 RetrievedContext
-  topic_matches
+  skill_matches
   prerequisite_context
   related_context
   learning_items
@@ -1060,7 +1082,7 @@ RetrievedContext
 Prompt packing order:
 
 1. TutorPlan instructions.
-2. Target topic and prerequisite state.
+2. Target skill and prerequisite state.
 3. Most relevant student evidence.
 4. Minimal approved memory context.
 5. Grounded content chunks.
@@ -1072,7 +1094,7 @@ Prompt packing order:
 Grounded technical explanations should prefer:
 
 ```text
-topic-specific chunks > area-level chunks > generic examples > model prior knowledge
+skill-specific chunks > area-level chunks > generic examples > model prior knowledge
 ```
 
 For cold-start or missing content, the TutorPlan should say whether the LLM may answer from general knowledge or should produce a fallback response with a practice-oriented explanation. This is a response-quality decision, not a data-ingestion concern.
@@ -1119,7 +1141,7 @@ It should be conservative. A turn that only teaches a concept can emit `taught` 
 Projectors update:
 
 ```text
-user_topic_state
+learner_skill_state
 user_learning_item_state
 user_profile_summary
 user_prep_task_progress only for durable prep-plan tasks
@@ -1129,7 +1151,7 @@ Projector logic should be deterministic and replayable from events, but this pha
 
 ### 12.4 State transition examples
 
-Topic state:
+Skill state:
 
 ```text
 not_started -> seen        after first exposure
@@ -1158,7 +1180,7 @@ verified -> needs_review/stale     after review interval
 
 The platform should use model calls in bounded roles.
 
-### 13.1 Intent/topic resolution
+### 13.1 Intent/skill resolution
 
 Use deterministic lookup first, model adjudication second.
 
@@ -1166,7 +1188,7 @@ Use deterministic lookup first, model adjudication second.
 Input: user message + short chat context
 Deterministic: aliases, slugs, FTS, trigram
 Model: disambiguate among candidates, classify intent
-Output: intent, area, topic candidates, confidence
+Output: intent, area, skill candidates, confidence
 ```
 
 ### 13.2 TutorPlan generation
@@ -1210,7 +1232,7 @@ pass_threshold
 help_level
 ```
 
-A diagnostic answer should update readiness only if it maps to a known topic/item and has sufficient confidence.
+A diagnostic answer should update readiness only if it maps to a known skill/item and has sufficient confidence.
 
 ---
 
@@ -1235,18 +1257,18 @@ A normal tutor turn should require bounded reads:
 Core indexes:
 
 ```text
-pt_topics(area_slug, slug)
-pt_topics(parent_topic_id)
-pt_topic_aliases(alias)
-pt_topic_aliases(topic_id)
-pt_concept_relationships(source_topic_id, relationship_type)
-pt_concept_relationships(target_topic_id, relationship_type)
-learning_items(primary_topic_id, item_type, difficulty)
-learning_item_topics(topic_id, role, relevance_weight)
-knowledge_chunks(topic_id, chunk_type)
-learning_events(user_id, topic_id, created_at desc)
+skills(area_slug, slug)
+skills(parent_skill_id)
+skill_aliases(alias)
+skill_aliases(skill_id)
+skill_relationships(source_skill_id, relationship_type)
+skill_relationships(target_skill_id, relationship_type)
+learning_items(primary_skill_id, item_type, difficulty)
+learning_item_skills(skill_id, role, relevance_weight)
+knowledge_chunks(skill_id, chunk_type)
+learning_events(user_id, skill_id, created_at desc)
 learning_events(user_id, learning_item_id, created_at desc)
-user_topic_state(user_id, topic_id)
+learner_skill_state(user_id, skill_id)
 user_learning_item_state(user_id, learning_item_id)
 user_context_events(user_id, normalized_key, is_current)
 user_profile_summary(user_id)
@@ -1255,7 +1277,7 @@ user_profile_summary(user_id)
 Optional PostgreSQL extensions:
 
 ```text
-pg_trgm for fuzzy topic/alias matching
+pg_trgm for fuzzy skill/alias matching
 PostgreSQL full-text search for content chunks
 pgvector for embedding retrieval if vector search is required
 ```
@@ -1265,7 +1287,7 @@ pgvector for embedding retrieval if vector search is required
 The orchestrator should cap prompt context:
 
 ```text
-DomainContext: compact topic/prerequisite graph only
+DomainContext: compact skill/prerequisite graph only
 StudentSnapshot: current target/prerequisite/item state, not full event history
 MemorySnapshot: only relevant preferences/goals/context
 Knowledge chunks: top N focused chunks, not broad corpus dumps
@@ -1278,13 +1300,13 @@ Recommended internal services:
 
 | Service | Responsibility |
 |---|---|
-| `DomainService` | Topic resolution, graph traversal, item retrieval, content retrieval. |
+| `DomainService` | Skill resolution, graph traversal, item retrieval, content retrieval. |
 | `StudentModelService` | State reads, evidence summaries, coding evidence interpretation. |
 | `UserMemoryService` | Profile summary, context events, optional Mem0 recall. |
 | `TutorOrchestratorService` | Strategy selection and TutorPlan generation. |
 | `ResponseGenerator` | LLM response under TutorPlan contract. |
 | `LearningEventExtractor` | Structured learning/context event extraction. |
-| `StateProjector` | Topic/item/profile projection updates. |
+| `StateProjector` | Skill/item/profile projection updates. |
 
 ---
 
@@ -1294,14 +1316,14 @@ Recommended internal services:
 
 | Option | Pros | Cons | Final decision |
 |---|---|---|---|
-| Keep exactly 7 tables | Minimal, fast to implement. | Weak topic resolution, JSON-heavy item mapping, no grounded content tables, no durable personalization truth. | Use only for prototype. |
-| 13-table production core | Still compact; directly supports topic resolution, retrieval, personalization, and production query patterns. | More schema upfront. | Recommended. |
+| Keep exactly 7 tables | Minimal, fast to implement. | Weak skill resolution, JSON-heavy item mapping, no grounded content tables, no durable personalization truth. | Use only for prototype. |
+| 13-table production core | Still compact; directly supports skill resolution, retrieval, personalization, and production query patterns. | More schema upfront. | Recommended. |
 
 ### 15.2 JSON metadata vs normalized domain tables
 
 | Use JSON for | Normalize now |
 |---|---|
-| Rubric details, UI hints, source-specific metadata, temporary item details. | Topic aliases, item-topic mapping, concept relationships, user topic/item states. |
+| Rubric details, UI hints, source-specific metadata, temporary item details. | Skill aliases, item-skill mapping, concept relationships, user skill/item states. |
 
 Final rule: JSON is acceptable for content-specific metadata, but not for relationships the orchestrator must query on every turn.
 
@@ -1339,7 +1361,7 @@ User: “What is deadlock?”
 
 1. IntentResolver:
    intent = concept_explanation
-   topic = operating_systems.deadlock
+   skill = operating_systems.deadlock
 
 2. DomainService:
    prerequisites = process, thread, lock, resource allocation, blocking wait
@@ -1348,7 +1370,7 @@ User: “What is deadlock?”
    learning_items = diagnostic question + checkpoint + debugging task
 
 3. StudentModelService:
-   target_topic_state = unknown or current
+   target_skill_state = unknown or current
    prerequisite_states = known/unknown/weak
    relevant_item_states = none or prior attempts
 
@@ -1396,7 +1418,7 @@ Strategy:
   creator_generation
 
 DomainContext:
-  target topic + prerequisites + common misconceptions
+  target skill + prerequisites + common misconceptions
 
 StudentSnapshot:
   difficulty and known weak prerequisites
@@ -1432,11 +1454,11 @@ LearningEvent
 Implement:
 
 ```text
-resolve_domain_topic()
-get_topic_graph()
+resolve_domain_skill()
+get_skill_graph()
 get_prerequisites()
-get_related_topics()
-get_learning_items_for_topic()
+get_related_skills()
+get_learning_items_for_skill()
 get_knowledge_context()
 ```
 
@@ -1445,7 +1467,7 @@ get_knowledge_context()
 Implement:
 
 ```text
-get_topic_state()
+get_skill_state()
 get_prerequisite_states()
 get_item_states()
 get_recent_learning_evidence()
@@ -1499,7 +1521,7 @@ Implement:
 ```text
 extract_learning_events()
 extract_user_context_events()
-project_topic_state()
+project_skill_state()
 project_item_state()
 project_profile_summary()
 ```
@@ -1524,14 +1546,14 @@ assessment_checkpoint
 
 The core tutor architecture is ready when these behaviors work consistently:
 
-1. A topic question resolves to a canonical topic, prerequisites, related topics, learning items, and knowledge chunks.
+1. A skill question resolves to a canonical skill, prerequisites, related skills, learning items, and knowledge chunks.
 2. A user with missing prerequisites receives prerequisite repair rather than a shallow generic answer.
 3. A user with verified prerequisites receives a direct, deeper answer.
 4. A user solving a problem receives progressive help, not an immediate full solution unless requested.
 5. A solved-with-help item does not become solved independently.
-6. A taught topic updates coverage but not verified readiness.
+6. A taught skill updates coverage but not verified readiness.
 7. A diagnostic answer can update readiness only with sufficient confidence.
-8. A stale topic triggers review instead of being treated as permanently mastered.
+8. A stale skill triggers review instead of being treated as permanently mastered.
 9. User preferences influence style and examples only when relevant.
 10. Mem0 recall can improve personalization but cannot override Postgres learning state.
 11. The LLM never independently mutates mastery; it only produces response text and structured extractor candidates.
@@ -1546,19 +1568,19 @@ The final implementation should use this system boundary:
 ```text
 PostgreSQL-only runtime
 
-Domain Model:
-  app.pt_areas
-  app.pt_topics
-  app.pt_topic_aliases
-  app.pt_concept_relationships
+Skill Graph:
+  app.skill_areas
+  app.skills
+  app.skill_aliases
+  app.skill_relationships
   app.learning_items
-  app.learning_item_topics
+  app.learning_item_skills
   app.knowledge_sources
   app.knowledge_chunks
 
-Student Model:
+Learner Skill Graph:
   app.learning_events
-  app.user_topic_state
+  app.learner_skill_state
   app.user_learning_item_state
   app.user_context_events
   app.user_profile_summary
@@ -1585,4 +1607,4 @@ LLM:
   never final authority for durable learner state
 ```
 
-The older 7-table design is a correct kernel, but not the final production architecture. The production-ready tutor needs topic aliases for reliable topic resolution, normalized item-topic mapping for accurate practice/retrieval, knowledge source/chunk tables for grounded response quality, and user context/profile tables for Mem0-backed personalization. These additions directly improve tutor quality, orchestration effectiveness, scalability, maintainability, response quality, and learning outcomes while still avoiding specialized table sprawl.
+The older 7-table design is a correct kernel, but not the final production architecture. The production-ready tutor needs skill aliases for reliable skill resolution, normalized item-skill mapping for accurate practice/retrieval, knowledge source/chunk tables for grounded response quality, and user context/profile tables for Mem0-backed personalization. These additions directly improve tutor quality, orchestration effectiveness, scalability, maintainability, response quality, and learning outcomes while still avoiding specialized table sprawl.

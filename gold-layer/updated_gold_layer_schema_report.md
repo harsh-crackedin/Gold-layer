@@ -1,11 +1,11 @@
-# CrackedIn Updated Gold Layer Schema Report — Gold V1
+# CrackedIn Updated Gold Layer Schema Report
 
 **Document type:** Updated schema/table/view report  
 **Project:** CrackedIn / InterviewPrep.ai  
 **Runtime database:** PostgreSQL only  
 **Design update:** 6 physical Gold tables + views/materialized views  
-**Scope:** Non-personalized interview-market intelligence across all interview question types, not only DSA  
-**Gold V1 boundary:** No user-specific readiness, personalized recommendations, revision state, prep-path state, watchlist state, notification state, learner memory, or user progress dependency
+**Scope:** Interview-market intelligence across all interview question types, not only DSA  
+**Out of scope:** User-specific readiness, personalized recommendations, revision state, prep-path state, and learner memory
 
 ---
 
@@ -60,46 +60,33 @@ This schema is designed for **all interview assessment item types**, including:
 - resume deep dives
 - product sense / estimation / case-style prompts
 
-Gold should not create a second DSA-only taxonomy. It should map questions and families to the shared Skill Graph through `gold.question_skills`.
-
-Gold V1 is intentionally **non-personalized**. It does not read or write user progress, learner state, readiness scores, target plans, watchlists, notifications, or recommendation rows. Those should be deferred to a later Tutor/App version that consumes Gold market-demand views as input.
+Gold should not create a second DSA-only taxonomy. It should map questions and families to the Tutor Skill Graph through `gold.question_skills`.
 
 ---
 
 ## 2. Source Table Usage Summary
 
-The following existing tables are referenced by the new Gold V1 schema. They are not recreated in this report.
+The following existing tables are referenced by the new Gold schema. They are not recreated in this report.
 
-### 2.1 Existing source tables used by Gold V1
-
-| Existing table | How Gold V1 uses it |
+| Existing table | How Gold uses it |
 |---|---|
 | `silver.interview` | Source of company, role family, level, dates, outcome, quality, public eligibility, and trend windows. |
 | `silver.round` | Source of round type, round order, stage structure, round-level difficulty, and interview loop profile data. |
 | `silver.assessment_item_occurrence` | Main source of reported questions/items. Gold maps each occurrence to a canonical question or family. |
 | `silver.signal` | Source of failure reasons, prep advice, red flags, process signals, interviewer behavior, and candidate mistakes. |
-| `silver.chunk` | Source for semantic/evidence retrieval. Gold V1 should reference it but not duplicate chunk text or embeddings. |
+| `silver.chunk` | Source for semantic retrieval and evidence search. Gold should not duplicate chunk text or embeddings. |
 | `silver.evidence_span` | Source of verified snippets used to explain why a trend or question is trusted. |
 | `silver.company` | Canonical company dimension used by Gold scope filters and company pages. |
 | `silver.canonical_ladder` | Cross-company level/rank dimension used for role-level aggregation. |
 | `silver.company_level` | Native company level mapping used when exact company-level filtering is needed. |
 | `catalog.coding_problems` | Optional platform-backed coding catalog used by `gold.question_references` for LeetCode/Codeforces/etc. mappings. |
-| `app.skills` | Shared Skill Graph node table. Gold maps questions/families to these skills through `gold.question_skills`. |
-| `app.skill_areas` | Skill domain grouping used for display and filtering through `app.skills`. |
-| `app.skill_aliases` | Optional enrichment input for resolving extracted tags/names to shared skills. |
-
-### 2.2 Existing tables explicitly not used by Gold V1
-
-Gold V1 should not depend on user-owned or learner-state tables. These may consume Gold later, but they are not part of the Gold V1 schema or refresh jobs.
-
-| Existing/future table family | V1 decision |
-|---|---|
-| `user_data.user_coding_problems`, `user_data.user_coding_submissions`, `code_blobs.*` | Not used by Gold V1. Later Tutor/App personalization can compare user practice history against Gold market demand. |
-| `app.learner_skill_state`, `app.user_learning_item_state`, `app.learning_events` | Not used by Gold V1. These belong to the Tutor Learner Skill Graph. |
-| `app.user_profile_summary`, `app.user_context_events`, external memory systems | Not used by Gold V1. These belong to user memory/personalization. |
-| `app.user_target_readiness_snapshots`, `app.user_gold_recommendations` | Not part of Gold V1. Defer to V2 Tutor/App product layer. |
-| `app.company_watchlists`, `app.watchlist_notifications` | Not part of Gold V1. Defer to V2 retention/notification layer that consumes `gold.v_trend_changes`. |
-| `app.learning_items` | Not required by Gold V1. Later Tutor/App can map Gold questions to practice/learning inventory. |
+| `app.skills` | Tutor Skill Graph node table. Gold maps questions/families to these skills through `gold.question_skills`. |
+| `app.skill_areas` | Skill domain grouping used indirectly through `app.skills`. |
+| `app.skill_aliases` | Useful for resolving question/family skill mappings during enrichment. |
+| `app.skill_relationships` | Useful for expanding market-demand signals to prerequisites and related concepts in Tutor/App. |
+| `app.learning_items` | Tutor-owned practice/learning inventory that may reference Gold questions later, but not owned by Gold. |
+| `user_data.user_coding_problems` | Tutor/App may combine this with Gold demand to personalize DSA prep. Gold does not store user progress. |
+| `app.learner_skill_state` | Tutor/App may combine this with `gold.v_skill_trends` for readiness gaps. Gold does not update learner state. |
 
 ---
 
@@ -113,7 +100,7 @@ Gold V1 should not depend on user-owned or learner-state tables. These may consu
 | `gold.questions` | Table | One canonical interview question/concept | Stable product-facing question object. |
 | `gold.question_references` | Table | One external reference per question | Map questions to platforms, URLs, named refs, or custom refs. |
 | `gold.question_occurrences` | Table | One Silver item occurrence mapping | Auditable mapping from raw reported item to Gold question/family. |
-| `gold.question_skills` | Table | One question/family-to-skill mapping | Bridge Gold market demand to shared Skill Graph. |
+| `gold.question_skills` | Table | One question/family-to-skill mapping | Bridge Gold market demand to Tutor Skill Graph. |
 | `gold.refresh_runs` | Table | One Gold pipeline job run | Track refresh, resolver, aggregation, and materialized view jobs. |
 
 ### 3.2 Gold views / materialized views
@@ -123,7 +110,7 @@ Gold V1 should not depend on user-owned or learner-state tables. These may consu
 | `gold.v_interview_scope` | View or materialized view | One eligible interview scope row | Standard company/role/level/date/quality surface. |
 | `gold.v_review_queue` | View | One occurrence needing review | Review UI/read surface over `question_occurrences`. |
 | `gold.v_question_trends` | View or materialized view | One question trend per scope/window | Trending questions across all item types. |
-| `gold.v_skill_trends` | View or materialized view | One skill trend per scope/window | Topic/skill demand trends using shared Skill Graph. |
+| `gold.v_skill_trends` | View or materialized view | One skill trend per scope/window | Topic/skill demand trends using Tutor Skill Graph. |
 | `gold.v_signal_trends` | View or materialized view | One signal trend per scope/window | Failure/prep/process/red-flag intelligence. |
 | `gold.v_interview_profiles` | View or materialized view | One loop profile per scope/window | Expected interview loop and round mix. |
 | `gold.v_trend_changes` | View or materialized view | One detected change per entity/scope | Rising, declining, new, resurfacing market signals. |
@@ -454,16 +441,16 @@ The system can trace the trend to `question_occurrences`, then back to Silver it
 
 ### Purpose
 
-Maps Gold questions and families to the shared Skill Graph.
+Maps Gold questions and families to the Tutor Skill Graph.
 
-This table prevents Gold from creating a duplicate topic taxonomy. Product UI can still say "topics", but backend should use `app.skills` as the canonical shared skill/concept layer.
+This table prevents Gold from creating a duplicate topic taxonomy. Product UI can still say "topics", but backend should use `app.skills` as the canonical skill/concept layer.
 
 ### Grain
 
 One mapping between either:
 
-- one Gold question and one shared skill, or
-- one Gold family and one shared skill.
+- one Gold question and one Tutor skill, or
+- one Gold family and one Tutor skill.
 
 At least one of `question_id` or `family_id` should be present.
 
@@ -473,7 +460,7 @@ At least one of `question_id` or `family_id` should be present.
 |---|---|
 | `gold.questions` | Exact question-to-skill mapping. |
 | `gold.question_families` | Family/pattern-to-skill mapping. |
-| `app.skills` | Canonical shared Skill Graph node. |
+| `app.skills` | Canonical Tutor Skill Graph node. |
 | `app.skill_aliases` | Helps resolve extracted tags/names to skills. |
 | `silver.assessment_item_occurrence.attributes.topics_reported` | Transitional signal for initial mapping. |
 | `catalog.coding_problems.topic_tags` | Useful for coding problem skill mapping. |
@@ -521,7 +508,7 @@ Answer:
 | Field | Example |
 |---|---|
 | `family_id` | `sd:rate-limiter` family ID |
-| `skill_id` | shared skill ID for `distributed-systems.rate-limiting` |
+| `skill_id` | Tutor skill ID for `distributed-systems.rate-limiting` |
 | `skill_slug` | `distributed-systems/rate-limiting` |
 | `relation_type` | `primary` |
 | `relevance_weight` | `1.0` |
@@ -822,7 +809,7 @@ Normal view in development. Materialized view for product pages.
 
 ### Purpose
 
-Answers topic/skill-level market-demand queries using the shared Skill Graph.
+Answers topic/skill-level market-demand queries using the Tutor Skill Graph.
 
 Examples:
 
@@ -839,7 +826,7 @@ One row per scope + skill + optional item type + time window.
 
 | Source | Usage |
 |---|---|
-| `gold.question_skills` | Maps questions/families to shared skills. |
+| `gold.question_skills` | Maps questions/families to Tutor skills. |
 | `gold.question_occurrences` | Interview support. |
 | `gold.questions` | Question metadata. |
 | `gold.question_families` | Family metadata. |
@@ -1325,7 +1312,7 @@ This is enough for:
 - company focus,
 - skill/topic trends,
 - review queue,
-- non-personalized market-demand read models.
+- market-demand signals for the Tutor.
 
 ## 26. Phase 3 - Product intelligence views
 
@@ -1358,55 +1345,7 @@ Keep the same names in application/service code. Internally decide whether each 
 
 ---
 
-# Part F - Gold V1 Non-Personalization Boundary
-
-Gold V1 should remain a pure market-intelligence layer.
-
-## 28. What Gold V1 must not store
-
-Do not add Gold V1 tables or columns for:
-
-- user readiness scores,
-- user-specific recommendations,
-- user weak/strong skill projections,
-- user target plans,
-- user revision priority,
-- user watchlists,
-- notification delivery state,
-- learner memory,
-- personalized dashboard state.
-
-## 29. What can consume Gold later
-
-A later Tutor/App V2 can consume Gold views such as:
-
-- `gold.v_question_trends`,
-- `gold.v_skill_trends`,
-- `gold.v_signal_trends`,
-- `gold.v_interview_profiles`,
-- `gold.v_trend_changes`.
-
-That V2 layer can compare non-personalized Gold market demand with user-owned state from Tutor/App tables, but that comparison result should live outside `gold.*`.
-
-Recommended V2-owned objects, if/when needed:
-
-| Future object | Owner | Why not Gold V1 |
-|---|---|---|
-| `app.user_target_readiness_snapshots` | Tutor/App | User-specific readiness projection. |
-| `app.user_gold_recommendations` | Tutor/App | Personalized action ranking. |
-| `app.company_watchlists` | App/Product | User-specific retained preference. |
-| `app.watchlist_notifications` | App/Product | User-specific delivery state. |
-
-The boundary is:
-
-```text
-Gold V1 = what the interview market is asking.
-Tutor/App V2 = what this specific user should do about it.
-```
-
----
-
-# Part G - Final Recommendation
+# Part F - Final Recommendation
 
 The updated Gold Layer should use:
 
@@ -1440,6 +1379,6 @@ This keeps the schema smaller, easier to rebuild, and more aligned with the sepa
 ```text
 Silver tells us what was reported.
 Gold tells us what it means in the interview market.
-Tutor/App V2 may later decide what it means for a specific user, outside `gold.*`.
+Tutor/App tells us what it means for this specific user.
 ```
 

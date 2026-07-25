@@ -3,7 +3,11 @@
 Status: proposed design, grounded in a full audit of the repository at `4e6491c`
 (master), PR #22 (`Feat/router-pipeline`, head `6177fe8`), and PR #18
 (`feat/mvp-ai-tutor-orchestrator`, head `0813e46` — source of the
-recommendation engine integrated in §7.6).
+recommendation engine integrated in §7.6). Revision 3 reworks priority
+scoring (§7.2), the storage model's versioning semantics (§8), worker
+topology (§9), adds a security section (§14), scopes the PR #18 reuse to the
+coding track (§7.6), and cuts a walking-skeleton M0 into the roadmap (§15)
+— in response to an external architecture review.
 Companion to the product handoff document ("CrackedIn Adaptive Preparation
 Planner — Product and Architecture Handoff"), which remains the product source
 of truth. This document turns that handoff into an implementable architecture
@@ -113,7 +117,7 @@ LeetCode sync is fully live: `user_data.user_coding_submissions`
 interview-frequency data (`problems.leetcode_number` in SQLite;
 `external_refs` inside silver `attributes`). Without a bridge, "you've
 already solved 40% of what Amazon asks" is impossible. The bridge is a
-prerequisite task in the roadmap (§12, P1).
+prerequisite task in the roadmap (§15, P1).
 
 **Recommendation engine (PR #18, `api/services/recommendations/`, unmerged).**
 A deterministic, fully heuristic "what should I solve next" engine built for
@@ -286,7 +290,7 @@ changes the plan's shape fundamentally.**
 | "Only theory" / "only questions" / "unseen only" | — | Preference flags; unseen-only cross-checks LeetCode history via the bridge (§6). |
 | Company with almost no evidence ("prepare me for a seed-stage startup") | evidence | Fallback ladder (§5.4) bottoms out at `fallback_profile` — a role/level-generic plan, labelled honestly ("No CrackedIn evidence for X; this is a strong general plan for backend mid-level"). Never fabricate company claims (validator V-10). |
 | Non-interview subject ("plan my wedding") | — | The selector simply doesn't call the planner tool (its description is scoped to interview/tech preparation); if called anyway, the normaliser returns a structured `unsupported_subject` and the selector explains. |
-| Request identical to an active plan | — | Idempotency (§9): `create_plan` returns the existing plan reference instead of a duplicate; the chat reply says the plan already exists and offers the window. |
+| Request identical to an active plan | — | Idempotency (§4.1, §8): `create_plan` returns the existing plan reference instead of a duplicate; the chat reply says the plan already exists and offers the window. |
 | User already has N active plans | — | Multi-plan is supported (legacy model already was). At 3+ active plans, the ack nudges consolidation ("want me to merge these into one multi-company plan?") but does not block. |
 
 `needs_input` (handoff §15) is reserved for exactly two cases: past interview
@@ -330,9 +334,10 @@ invariant globally. Instead:
    (`{"status": "auth_required"}`) when `user_id` is missing. This is the one
    genuinely invasive edit to PR #22, and it is small.
 3. Mutation handlers enforce, in order: auth present → ownership → input
-   validation → **idempotency** (key = `sha256(user_id + normalised_request)`
-   stored on `prep_plans.idempotency_key`, unique) → rate limit (≤3 plan
-   creations/hour/user) → enqueue → audit event (`prep_plan_events`).
+   validation → **idempotency** (`request_fingerprint =
+   sha256(normalised_request)`, unique per user across *live* plans only —
+   §8) → rate limit (≤3 plan creations/hour/user) → enqueue → audit event
+   (`prep_plan_events`).
 
 `create_plan` itself does no generation: normalise (§3), insert
 `prep_plans(status='generating')` + `prep_plan_events(plan_created)`, enqueue
@@ -540,6 +545,11 @@ directly powers:
   low/none), so the first regeneration corrects the assumed level — cheap
   adaptive value on day one, no mastery model required.
 
+Seeding covers **coding-track skills only** (§7.6 scope limit): system-design
+and behavioural skills have no external history to seed from, so they start
+at the neutral prior with evidence tier `none` — which automatically routes
+day-0 diagnostic probes toward them.
+
 If no LeetCode account is synced, everything above degrades to priors and the
 ack nudges: "Connect LeetCode and I'll skip what you've already solved."
 
@@ -579,27 +589,84 @@ Port of `prep_skeleton`'s budget model, generalised:
   company-specific split (skills shared by ≥2 targets get the coverage
   bonus) → capacity reservation derived from actual overlap.
 
-Priority scoring, deterministic and unit-testable (handoff §9.3 signals with
-concrete sources). The formula has two halves: the first two lines are the
-**evidence half** (this design's §5); every user-side term below them is
-implemented by a ported PR #18 component (§7.6) rather than new code:
+Priority scoring is deterministic and unit-testable (handoff §9.3 signals
+with concrete sources). It is deliberately **three separate stages — gates,
+scores, ordering — not one formula**: a single expression that mixes hard
+constraints, unbounded evidence sums, multiplicative factors, and absolute
+subtraction is impossible to reason about (any zero factor silently
+annihilates an item; unbounded corpus mass drowns bounded pedagogy; a
+subtraction can push scores negative).
+
+**Stage 1 — hard gates (boolean, evaluated first, each gate named in the
+task breakdown when it fires):** the §7.3 guardrails (difficulty
+categorically outside the maturity range, anti-frustration, cooldown,
+solved-only-as-revision); the prerequisite gate (an item whose prerequisite
+skill sits below threshold mastery is ineligible except as part of that
+skill's on-ramp); preference gates (`theory_only`, `questions_only`,
+`unseen_questions_only`). Gates are never expressed as score factors —
+an excluded item is excluded for a stated reason, not scored to zero.
+
+**Stage 2 — two independent scores, each normalised to [0,1]:**
 
 ```text
-priority(item) =
-    Σ_targets [ target_weight × weighted_frequency × round_importance × trend ]
-  × confidence
-  × pedagogical_need(item)     # PR #18 user-side composite, §7.6:
-                               #   topic weakness / need_score (topic_analysis)
-                               #   failed_attempt_score (incl. near_solve)
-                               #   revision_due_score (staleness step-decay)
-                               #   difficulty_match (maturity × difficulty table)
-                               #   freshness (recency of contact)
-  × prerequisite_readiness     # curriculum graph, §7.1 (planner-only)
-  × coverage_bonus(shared targets)
-  − already_solved_penalty     # §6.2 three-way policy (PR #18 components)
-  − repetition_penalty         # recently-shown / same-skill-too-recently
-                               # (PR #18 penalty + 90-day memory pattern)
+evidence_score(item) =
+    weighted_mean over targets [
+        target_weight ×
+        (weighted_frequency / max weighted_frequency in that target cohort)
+        × round_importance × trend        # bounded multipliers, 0.5–1.2
+    ]
+    × coverage_bonus                       # 1.0–1.25, shared by ≥2 targets
+    × confidence_damping                   # 1.0 high / 0.9 moderate /
+                                           # 0.8 limited — applied ONLY when
+                                           # cohorts of different confidence
+                                           # compete in one candidate pool
 ```
+
+Per-cohort max-normalisation makes the top-asked item score 1.0 whether the
+cohort has 40 reports or 4,000, so evidence and pedagogy live on the same
+scale. Confidence is otherwise carried as a *label*, not a multiplier — a
+uniformly low-confidence cohort should change what the UI says, not
+flatten the ordering.
+
+```text
+pedagogical_score(item) =                  # ported PR #18 scorer, §7.6,
+    0.26 × topic_weakness                  # re-weighted after REMOVING its
+  + 0.24 × failed_attempt (incl. near_solve)  # importance + interview_frequency
+  + 0.20 × difficulty_match                # signals — both now live in the
+  + 0.14 × revision_due                    # evidence half; keeping them would
+  + 0.10 × progression                     # double-count frequency. Remaining
+  + 0.06 × freshness                       # six re-normalised to sum 1.0.
+```
+
+The weights are starting values, pinned by golden tests (§7.6 F2) and tuned
+only through those tests.
+
+**Stage 3 — combination and total order:**
+
+```text
+priority(item) = evidence_score^0.6 × max(pedagogical_score, 0.15)^0.4
+                 × repetition_multipliers   # recently-shown ×0.85,
+                                            # same-skill-too-recently ×0.9 —
+                                            # bounded multipliers, never
+                                            # subtraction
+```
+
+- The geometric blend encodes "must matter to the target AND serve the
+  user"; 0.6/0.4 puts evidence in the lead for company plans.
+  `general_subject` plans invert the exponents (0.4/0.6) and read
+  `evidence_score` from the global corpus instead of a company cohort.
+- The **0.15 pedagogical floor** prevents mastery-annihilation: a fully
+  mastered, company-critical item never vanishes — it survives at reduced
+  priority and enters as a revision task (§6.2), which is the correct
+  product behaviour for "you'll still be asked Two Sum".
+- Total order is `(−priority, confidence_label, canonical item_id)` —
+  fully deterministic; no tie is ever resolved by iteration order or
+  randomness.
+
+Every stage writes its intermediates into the per-task breakdown
+(`prep_plan_tasks.evidence_jsonb`): fired gates by name, both halves' raw
+signals, the blend — this is what "why this task?" renders and what golden
+tests assert against.
 
 ### 7.3 Rolling execution window
 
@@ -674,6 +741,33 @@ The generators' *conditions* (retry-ready, revision-stale, next-in-topic
 progression, similar-reinforcement) survive as task-type selection rules
 inside window materialisation.
 
+**Scope limit — the engine is coding-track only.** Its signals presuppose
+things only coding problems have: submission verdicts and testcase counts
+(`near_solve_score`), an easy/medium/hard triple (`DIFFICULTY_MATCH`),
+LeetCode topic tags, and a synced attempt history. None of that exists for
+system-design, LLD, or behavioural tasks, so the ported components score
+**only the coding portion** of a plan. Non-coding tracks use a reduced
+pedagogical score built from what those tracks do have:
+
+```text
+pedagogical_score_noncoding(item) =
+    0.40 × curriculum_position      # §7.1 prerequisite-graph progression
+  + 0.35 × observed_skill_gap       # user_skill_state from plan-task events
+                                    # (hinted/struggled/skipped — §12); starts
+                                    # at the 0.5 neutral prior on a cold start
+  + 0.25 × revision_due             # PR #18's staleness step-decay IS
+                                    # reusable here — it is a pure function of
+                                    # days, fed from prep_plan_events
+                                    # completion dates instead of latest_ac_at
+```
+
+This means non-coding tracks are evidence-led and become user-adaptive only
+as the user works through the plan — an honest statement of the available
+signal, not a gap to paper over. The claim in earlier revisions that the
+engine powers "the user-side half" generally is hereby narrowed: it powers
+the user-side half *of the coding track*, which is where most per-user
+signal exists anyway.
+
 **How the two halves compose.** The worker builds one
 `UserRecommendationState`-shaped object per generation from the same tables
 PR #18 reads (`user_data.user_coding_problems`, `user_coding_submissions`)
@@ -733,7 +827,7 @@ rebase lands — until then the planner vendors the slice under
 `planner/pedagogy/` with a provenance header naming the source commit
 (`0813e46`). Either way, tutor and planner then share one definition of
 "what this user is weak at". This needs agreement with PR #18's author
-(open question §15.6).
+(open question §16.6).
 
 ---
 
@@ -751,8 +845,14 @@ prep_plans        (id BIGSERIAL PK, user_id UUID → public.users,
                                        'completed','archived')),
                    timezone TEXT, start_date DATE, target_date DATE,
                    daily_budget_minutes INT, available_days JSONB,
-                   active_version_id BIGINT, idempotency_key TEXT UNIQUE,
+                   active_version_id BIGINT,   -- no FK: see versioning notes
+                   request_fingerprint TEXT NOT NULL,
                    created_at, updated_at)
+-- idempotency is scoped to LIVE plans only (an archived plan must not
+-- swallow a fresh identical request forever):
+CREATE UNIQUE INDEX prep_plans_live_fingerprint
+  ON prep_plans (user_id, request_fingerprint)
+  WHERE status NOT IN ('archived','completed','failed');
 
 prep_plan_versions(id, plan_id FK, version INT,
                    normalised_request_jsonb JSONB,
@@ -763,28 +863,73 @@ prep_plan_versions(id, plan_id FK, version INT,
                    validation_report_jsonb JSONB, created_at,
                    UNIQUE (plan_id, version))          -- immutable rows
 
-prep_plan_tasks   (id, plan_id FK, version_id FK, scheduled_date DATE,
-                   position INT, item_id TEXT,          -- canonical or read:/concept:/mock:/revision:
+prep_plan_tasks   (id, plan_id FK, version_id FK,
+                   lineage_id UUID NOT NULL,  -- STABLE across versions:
+                                              -- copy-forward preserves it,
+                                              -- fresh tasks mint a new one
+                   scheduled_date DATE, position INT,
+                   item_id TEXT,              -- canonical or read:/concept:/mock:/revision:
                    task_type TEXT, skill_ids TEXT[],
                    estimated_minutes INT, difficulty TEXT,
-                   status TEXT CHECK (status IN ('pending','done','hinted',
-                                                 'struggled','skipped')),
+                   status TEXT CHECK (status IN ('pending','done','skipped')),
+                   outcome_flags TEXT[] DEFAULT '{}',  -- 'hinted','struggled',
+                                              -- 'completed_external' — signals
+                                              -- about HOW, not lifecycle states
                    locked BOOL DEFAULT FALSE, user_added BOOL DEFAULT FALSE,
                    selection_reason TEXT, evidence_jsonb JSONB,
                    user_override JSONB, created_at, updated_at,
-                   UNIQUE (plan_id, scheduled_date, item_id))
+                   UNIQUE (version_id, scheduled_date, item_id),
+                   UNIQUE (version_id, lineage_id))
 
 prep_plan_events  (id, plan_id FK, user_id UUID, event_type TEXT,
-                   task_id BIGINT NULL, payload_jsonb JSONB, created_at)
+                   task_lineage_id UUID NULL,  -- survives regeneration; a row
+                                               -- id would dangle as soon as a
+                                               -- new version copies the task
+                   payload_jsonb JSONB, created_at)
                    -- append-only; event vocabulary per handoff §16.4
 
-user_skill_state  (user_id UUID, skill_id TEXT, mastery_score REAL,
-                   confidence REAL, attempt_count INT, success_count INT,
+user_skill_state  (user_id UUID, skill_id TEXT,
+                   mastery_score REAL,        -- current blended value
+                   confidence REAL,           -- evidence tier, §6.2
+                   seed_mastery REAL, seed_confidence REAL, seeded_at,
+                                              -- the LeetCode-derived seed is
+                                              -- kept separately so observed
+                                              -- learning never erases — and is
+                                              -- always distinguishable from —
+                                              -- the cold-start estimate
+                   attempt_count INT, success_count INT,
                    hint_count INT, failure_count INT,
                    last_practised_at, next_revision_at, updated_at,
-                   source TEXT,               -- 'seeded_leetcode' | 'observed'
                    PRIMARY KEY (user_id, skill_id))
 ```
+
+Versioning semantics — the invariants that make the schema self-consistent:
+
+- **Task uniqueness is per version, not per plan.** Regeneration writes a
+  complete new task set under the new `version_id` (future dates recomputed,
+  past/completed/locked/user-added rows copied forward byte-identical with
+  their `lineage_id` preserved), then flips `active_version_id` in the same
+  transaction. A plan-wide unique key would make every regeneration violate
+  itself; per-version keys make old versions immutable history and the
+  active version the single serving surface.
+- **Identity across versions is `lineage_id`.** Progress updates, events,
+  and API task references address `(plan_id, lineage_id)` resolved through
+  the active version — row ids are storage, lineage is identity. This is
+  what lets "done" survive regeneration and lets events written last week
+  still join to today's task rows.
+- **`active_version_id` carries no FK** (it would be circular with
+  `prep_plan_versions.plan_id`); integrity is enforced by the single
+  transaction that inserts the version and flips the pointer, and a nightly
+  invariant check (§13) asserts every pointer resolves.
+- **Constraint authority is split explicitly:** the `prep_plans` row holds
+  the *current* constraints (mutable via `POST /constraints`) and is what the
+  next generation reads; `normalised_request_jsonb` on each version is the
+  *frozen record* of what that generation actually used. They are expected
+  to diverge between a constraints edit and the regeneration it enqueues.
+- **Status vs signals:** `status` is lifecycle only (`pending → done |
+  skipped`); `hinted`/`struggled` are `outcome_flags` — they describe how a
+  task went, can coexist with `done`, and feed skill-state updates without
+  corrupting completion semantics.
 
 Progress lives **on the task rows** (denormalised current state) *and* in the
 event log (authoritative history) — the legacy lesson that keying progress by
@@ -792,33 +937,60 @@ event log (authoritative history) — the legacy lesson that keying progress by
 keyed on the user, plus canonical `item_id`s that are stable across plans.
 
 Concurrency: mutations carry `expected_plan_version`; a version bump between
-read and write → 409, the client refetches. Regeneration writes a **new
-version row + new task rows for future dates only**, then flips
-`active_version_id` — past/completed/locked/user-added tasks are copied
-forward untouched (handoff §17/§18.4 invariants), enforced by the validator,
-not by convention.
+read and write → 409, the client refetches.
 
 ---
 
 ## 9. Worker and job architecture
 
-Copy of the proven catalog-worker pattern (`api/main.py:61`,
-`extension_sync/catalog_worker.py`):
+The **queue** copies the proven catalog-worker pattern (pgmq, visibility
+timeout, retry-then-archive — `extension_sync/catalog_worker.py`). The
+**topology does not**: the catalog worker is a daemon thread inside the API
+process (`api/main.py:61`), which is fine for its lightweight event syncing
+but wrong for plan generation — a 20–60 s LLM-bound job inside gunicorn
+competes with request serving for CPU and memory, dies on every deploy and
+worker recycle, and under multiple API replicas every process would start a
+duplicate consumer thread it was never designed to be.
 
+- **Dedicated worker process:** `python -m api.planner_worker`, same codebase
+  and virtualenv, no HTTP surface, its own systemd unit
+  (`interview-prep-planner-worker.service` alongside
+  `deploy/interview-prep.service`). One instance is sufficient for MVP;
+  scaling is "run more instances" because every job is safe under
+  at-least-once delivery (below). API replicas never consume the queue.
 - pgmq queue `plan_jobs`; messages `{plan_id, reason, requested_version}`.
-- Daemon consumer thread started at app boot; visibility-timeout redelivery
-  handles worker death; ≥3 failed attempts → archive + `status=failed` +
+  **Visibility timeout is set above p99 generation time** (5 min to start)
+  so a live worker is never raced by redelivery; a crashed worker's job
+  redelivers after the timeout.
+- **Every job is idempotent and lock-guarded:** the job takes a Postgres
+  advisory lock on `plan_id` (concurrent jobs for one plan cannot
+  interleave), re-checks that its `requested_version` has not already been
+  superseded (no-op if so — this also collapses duplicate enqueues), and
+  writes its output — version row, task rows, `active_version_id` flip — in
+  **one transaction**. A redelivered job after a crash therefore either
+  finds the version already written and no-ops, or re-runs cleanly from
+  nothing. ≥3 failed attempts → archive + `status=failed` +
   `generation_failed` event.
+- **Graceful shutdown:** SIGTERM stops dequeuing and lets the in-flight job
+  finish (bounded by the visibility timeout); a hard kill just means
+  redelivery. Deploys restart the worker unit after the API unit.
+- **Scheduled work has one owner, not one per replica:** the nightly
+  per-timezone window roll is enqueued by a single scheduler — pg_cron in
+  the app database (preferred: no new infrastructure) or the existing
+  Dagster schedule — never by API-process cron. The roll job is idempotent
+  via a `window_rolled_through DATE` column on `prep_plans`: re-enqueueing
+  the same day no-ops.
+- **Enqueue discipline on the API side:** plan creation enqueues exactly one
+  `initial` job inside the same transaction that inserts the plan row
+  (status-transition guarded); edit/constraint regenerations may enqueue
+  freely because superseded-version no-ops make duplicates harmless.
 - Job steps are §2's numbered list; each stamps progress into
   `prep_plan_events` so the UI can show "analysing evidence → building
-  curriculum → selecting tasks".
-- **Concurrency guards:** the job re-checks `status='generating'` and takes a
-  Postgres advisory lock on `plan_id` (two regeneration jobs can't interleave);
-  user edits during generation queue as events and are applied by an
-  immediate follow-up regeneration rather than mid-job merging.
-- Regeneration reasons: `initial`, `window_roll` (nightly per-timezone roll
-  materialises the next day), `user_edit`, `constraints_changed`,
-  `completion_adaptation`, `manual_retry`.
+  curriculum → selecting tasks". User edits during generation queue as
+  events and are applied by an immediate follow-up regeneration rather than
+  mid-job merging.
+- Regeneration reasons: `initial`, `window_roll`, `user_edit`,
+  `constraints_changed`, `completion_adaptation`, `manual_retry`.
 
 ---
 
@@ -929,7 +1101,108 @@ queryable without new infrastructure.
 
 ---
 
-## 14. Implementation roadmap (repo-mapped)
+## 14. Security and privacy
+
+Three trust boundaries, each with its own threat model.
+
+### 14.1 The mutation lane (LLM-decided writes)
+
+The selector LLM chooses when `create_plan` fires and what arguments it
+carries — which makes conversation content an input to a write path.
+Anything the user (or pasted content) says can try to steer the tool call.
+Defences, all deterministic and server-side:
+
+- **Identity is never an argument.** No planner tool accepts a user id,
+  plan owner, or session id from the LLM; identity comes exclusively from
+  the authenticated `ToolContext` (§4.1). There is no argument the model
+  could produce that operates on another user's data.
+- **The normaliser is the trust boundary.** The LLM *extracts*; it never
+  *authorises*. Every argument is re-validated by the §3.1 normaliser:
+  companies resolve against the known-alias table or are dropped, durations
+  clamp to [1, 365], daily budget to [15, 480] minutes, targets cap at 6,
+  free-text never passes through to storage or prompts unchecked. Plan
+  titles are composed server-side from normalised fields — never
+  LLM-authored strings.
+- **Cost ceilings as security controls:** ≤3 plan creations/hour and ≤10
+  generation jobs/day per user (regenerations included) cap the LLM spend
+  any single account — or any prompt-injection attempt — can trigger. The
+  same limits apply to the REST endpoints (§10), which share the handler.
+- **Full audit trail:** every mutation writes a `prep_plan_events` row with
+  actor, origin (`chat` | `rest`), the normalised request, and the
+  idempotency outcome — replayable per user.
+- Anonymous-JWT users never see mutation tools (registry factory, §4.1);
+  `create_plan` is excluded from argument inheritance (§4.2) so a stale
+  conversational filter can never become an implicit write.
+
+### 14.2 User-generated evidence (interview reports)
+
+Corpus text is untrusted **twice**: as *input* to the generation LLM
+(scraped or user-submitted reports can contain adversarial instructions)
+and as *output* surfaced to other users (reports can contain PII).
+
+- **Injection containment is structural, not prompt-polite.** Sampled
+  evidence enters generation prompts inside delimited data blocks, but the
+  real defence is §7.5: the validator confines LLM output to the
+  deterministic candidate pool, so injected text cannot add tasks, links,
+  or refs — at worst it wastes a retry. Day themes and task notes (the only
+  free-text the LLM writes) are validated for length and rendered as plain
+  text, never markdown-with-links, in the panel.
+- **PII redaction happens at the boundary:** the snapshot publisher (§5.1)
+  runs a redaction pass (names, emails, phone numbers, employee ids) before
+  `evidence.interview_samples` leaves the ingest database. The app database
+  never holds unredacted report text; aggregate signal tables hold no report
+  text at all.
+- **UI exposure is counts-first:** `evidence_jsonb` shown on tasks carries
+  counts and canonical titles ("asked in 18 Meta interviews"), not verbatim
+  quotes; quotes appear only through the citation path, which serves
+  curated, redacted sample rows.
+
+### 14.3 Storage and access
+
+- Every REST route resolves plan/task ownership before acting and returns
+  **404 (not 403)** on foreign ids — no existence oracle.
+- All five planner tables get RLS policies (`user_id = auth.uid()`),
+  matching the pattern PR #18's migrations already use — defence-in-depth
+  even though the API connects with a service role, and a prerequisite for
+  any future direct-from-frontend Supabase read.
+- Plan, task, event, and skill-state rows **cascade-delete with the user
+  account**. Skill state and plan events are per-user learning records:
+  excluded from analytics exports unless aggregated across ≥ k users.
+  Snapshot tables (`evidence.*`) contain no user data by construction.
+- Observability (§13) logs evidence *ids* and score breakdowns, never raw
+  report text or prompt bodies.
+
+---
+
+## 15. Implementation roadmap (repo-mapped)
+
+The full design is intentionally larger than the first shippable increment.
+Two scope controls make delivery tractable:
+
+**M0 — walking skeleton (ships first, before any P-phase completes).**
+One end-to-end vertical slice, deliberately narrow: a **single-company,
+coding-round-only, 14-day plan**; evidence profile from a one-off aggregate
+script over `silver` (the full publisher comes in P1 — M0 only needs one
+cohort's numbers in a table); candidate pool from `evidence.problem_bridge`
++ `catalog.coding_problems`; the ported skeleton + validator; the dedicated
+worker with a single `initial` job; three REST endpoints (create / window /
+task-done); and **`TodayTasks` wired to the real window — the first thing
+that replaces the prep panel's mock state with live data**. No chat, no
+multi-company, no LLM theming (deterministic day titles), no adaptation
+beyond marking done. M0 exists to force every risky seam — silver read,
+bridge join, worker transaction, versioned tasks, UI contract — through real
+data in week one, so the review's "static, not runtime-verified" caveat
+stops being true at the earliest possible moment.
+
+**Launch gate (v1) and explicit deferrals.** V1 launch =
+M0 + P1 + P2 + P3-core + P4: single- and multi-company plans across coding +
+system-design rounds, REST + rail UI, chat-driven creation. Explicitly
+**deferred to v1.1** (designed, not built): the curriculum overview page
+(§11 — the rail window alone is the launch surface), behind-plan strategy
+cards (§12), mock-interview and behavioural task depth, the `plan`
+rich-block, and `preview_plan_profile` for anonymous users. Everything in
+the deferral list has its storage and events shipped in v1 so v1.1 is
+additive.
 
 **P1 — Foundations (unblocks everything)**
 1. `evidence.problem_bridge` (slug ⇄ leetcode_number ⇄ display_id) + backfill.
@@ -968,7 +1241,7 @@ metrics dashboards, small-beta rollout.
 
 ---
 
-## 15. Open questions for the founder
+## 16. Open questions for the founder
 
 1. Confirm D1–D5 (§0) — especially D2, since it reinterprets the handoff's
    "expanded plan surface" in favour of the repo's banned-concept stance.

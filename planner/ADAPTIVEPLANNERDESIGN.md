@@ -1,7 +1,9 @@
 # CrackedIn Adaptive Preparation Planner — System Design (v1)
 
 Status: proposed design, grounded in a full audit of the repository at `4e6491c`
-(master) and PR #22 (`Feat/router-pipeline`, head `6177fe8`).
+(master), PR #22 (`Feat/router-pipeline`, head `6177fe8`), and PR #18
+(`feat/mvp-ai-tutor-orchestrator`, head `0813e46` — source of the
+recommendation engine integrated in §7.6).
 Companion to the product handoff document ("CrackedIn Adaptive Preparation
 Planner — Product and Architecture Handoff"), which remains the product source
 of truth. This document turns that handoff into an implementable architecture
@@ -13,9 +15,9 @@ companies, no role, topic-only, etc.).
 
 ## 0. Decisions taken up front (read this first)
 
-Four decisions in the handoff were ambiguous or contradicted by the chat
-discussion / the repository. Each was resolved to the option below; all four
-are overridable, but the rest of this document assumes them.
+Five decisions were ambiguous or contradicted by the chat discussion / the
+repository. Each was resolved to the option below; all five are overridable,
+but the rest of this document assumes them.
 
 | # | Decision | Resolution | Why |
 |---|---|---|---|
@@ -23,6 +25,7 @@ are overridable, but the rest of this document assumes them.
 | D2 | Plan UI surface | **Execution window in the rail + a curriculum overview surface. No day-by-day multi-week calendar.** | Handoff §19 asks for an "expanded plan surface", but `web/components/prep/my-prep-panel.tsx` carries a deliberate product comment that a static multi-week plan is a *banned concept*, and the old `/prep/plan` day timeline was retired in favour of the Days/Topics toggle. The curriculum overview (phases, topics, coverage, confidence, editing) satisfies the handoff's intent without resurrecting the banned artifact — because what we store beyond the window is skills/topics, not a fixed question calendar (§2 of the handoff already says exactly this). |
 | D3 | Evidence corpus | **Postgres `silver.*` + a "gold-lite" canonical layer, published as snapshot tables into the app database.** Not the legacy SQLite corpus; not the full gold clustering pipeline. | The live SQLite corpus has no question identity, no level resolution, and is slated for retirement. `silver.*` is built, rich (rounds, `assessment_item_occurrence` with `prompt_hash`, LLM-resolved levels, evidence spans) and currently has zero API readers — the planner is the reason to finally wire it. The full gold pipeline (ANN → cross-encoder → LLM adjudication, `docs/GOLD-LAYER-HANDOFF.md`) is weeks of work and not a prerequisite: gold-lite (below, §5.3) gives real canonicalisation where it matters most. |
 | D4 | V1 scope | **Create + rolling window + light adaptation.** Skill state is *stored* from day one but only lightly used; the full mastery model, spaced-revision ladder, and ahead/behind replan strategies are v2. | Ships a genuinely "living" plan (regeneration on edits/completions, already-solved filtering, locks) without gating launch on a research-grade adaptation engine. The storage model (§8) is designed so v2 needs no schema rework. |
+| D5 | User-side scoring | **Reuse the PR #18 recommendation engine's pure modules as the planner's pedagogical scoring half** (§7.6), instead of building `user_gap`, already-solved handling, and difficulty calibration from scratch. | PR #18 (`api/services/recommendations/`) is a deterministic 8-signal heuristic scorer — no ML — whose user-side half (topic weakness, failed-attempt/near-solve, revision staleness, maturity×difficulty matching, anti-frustration guardrails, diversity) implements exactly the user-side terms of the planner's priority formula. 12 of its 14 modules are pure (stdlib dataclasses, explicit `now`, no I/O), have zero tutor coupling, and already run on the same Postgres tables and UUID user ids this design targets. It knows nothing about companies or interview evidence, so it complements rather than overlaps the evidence layer. |
 
 ### Contradiction log (handoff vs chat vs repo)
 
@@ -112,6 +115,29 @@ interview-frequency data (`problems.leetcode_number` in SQLite;
 already solved 40% of what Amazon asks" is impossible. The bridge is a
 prerequisite task in the roadmap (§12, P1).
 
+**Recommendation engine (PR #18, `api/services/recommendations/`, unmerged).**
+A deterministic, fully heuristic "what should I solve next" engine built for
+the AI-tutor sidebar: fixed-weight linear scoring over 8 signals
+(`SCORING_WEIGHTS` sums to exactly 1.0 — importance 0.16,
+interview_frequency 0.14, topic_weakness 0.18, difficulty_match 0.14,
+failed_attempt 0.16, revision_due 0.10, progression 0.08, freshness 0.04),
+user-state classifiers (maturity ladder by solve count; activity states;
+learning states), per-topic weakness/need analysis with evidence tiers, seven
+candidate generators, rule guardrails, and a diversity re-rank. **No ML
+anywhere** — no embeddings, no trained model, no collaborative filtering.
+Properties that matter here: 12 of 14 modules are pure and DB-free (frozen
+`now` passed in; proven by `tests/test_recommendation_topic_analysis.py`,
+which runs the full pipeline with zero database); dependency arrow is strictly
+tutor → recommendations, never the reverse; the impure remainder
+(`repository.py`, `candidate_service.py`) reads the same
+`user_data.user_coding_problems` / `user_coding_submissions` /
+`catalog.coding_problems` tables with UUID user ids this design already
+targets. Limits: single-shot top-3 output (no calendar, no curriculum),
+hard-locked to one curated sheet (`catalog.dsa_sheet_problems`,
+`('leetcode','default_dsa_sheet','v1')`), and zero company/interview-evidence
+awareness — its `interview_frequency_score` is a static curated column, not
+report data. §7.6 defines exactly what is reused and what is not.
+
 **Worker precedent.** `api/main.py:61` starts a daemon thread running
 `extension_sync/catalog_worker.py` over a pgmq queue (`events`) with retry +
 archive semantics. The plan-generation worker copies this pattern.
@@ -142,9 +168,11 @@ client (`PrepTask`, `TodayResponse`, `startPrepPlan`, …).
                        ┌────────────────────────────────────────────┐
                        │ Plan worker (daemon thread, pgmq consumer) │
                        │  1. evidence profile   (signal tables)     │
-                       │  2. user signal load   (LC history, skill) │
+                       │  2. user signal load   (LC history, skill; │
+                       │     PR #18 topic/user-state analysis)      │
                        │  3. curriculum blueprint (deterministic)   │
-                       │  4. candidate ranking  (deterministic)     │
+                       │  4. candidate ranking  (evidence score ×   │
+                       │     PR #18 pedagogical score, §7.6)        │
                        │  5. 3-day materialisation + LLM theming    │
                        │  6. validation (retry ≤2) → persist version│
                        │  7. status → ready | failed | needs_input  │
@@ -475,22 +503,42 @@ company-specific claims on fallback-profile cohorts.
 ### 6.2 Cold-start skill state (an improvement over the handoff)
 
 At plan creation the worker **seeds `user_skill_state` from LeetCode history**
-via the bridge: for each skill, mastery is estimated from solved-problem
-coverage weighted by difficulty, recency-decayed (a problem solved 14 months
-ago contributes little), with hint/WA-heavy solves discounted. This replaces
-the handoff's implicit cold start (everyone begins unknown) and directly
-powers:
+via the bridge. This is no longer greenfield: the seeding computation *is*
+PR #18's per-topic analysis (§7.6), run over the planner's skill taxonomy
+instead of sheet topics. Per skill:
 
-- **already-solved policy** — three-way, not boolean:
-  recent clean AC (≤90 d, low attempts) → excluded from fresh scheduling,
-  eligible for revision slots; old AC (>90 d) → schedulable as a timed
-  re-solve labelled "refresher"; attempted-but-failed → scheduled *earlier*
-  with a lower-difficulty on-ramp for that skill.
-- **level calibration** when the user stated no level (§3.3).
+- **weakness** from `topic_analysis.py`'s formula —
+  `0.35·failure_ratio + 0.25·repeated_failure + 0.25·unsolved_attempted +
+  0.15·accuracy_gap` — with its **evidence tiers** (high/medium/low/none by
+  attempted- and submission-count floors) clamping the score when data is
+  thin, so a single bad submission can never brand a skill "weak";
+- **mastery** as the complement of weakness, blended with solved-problem
+  coverage weighted by difficulty and recency-decayed (a problem solved 14
+  months ago contributes little);
+- `user_skill_state.confidence` recording the evidence tier, and
+  `source='seeded_leetcode'`.
+
+This replaces the handoff's implicit cold start (everyone begins unknown) and
+directly powers:
+
+- **already-solved policy** — three-way, not boolean, implemented with PR #18
+  scoring components: recent clean AC (≤90 d, low attempts) → excluded from
+  fresh scheduling, eligible for revision slots via `revision_due_score`
+  (step-decay on days since last AC: 0 → 0.25 → 0.5 → 0.75 → 1.0 at
+  7/21/45/90 d); old AC (>90 d) → schedulable as a timed re-solve labelled
+  "refresher"; attempted-but-failed → scheduled *earlier* via
+  `failed_attempt_score`, whose `near_solve_score` input (share of testcases
+  passed on the latest submission) distinguishes "almost had it — retry soon"
+  from "fundamentally stuck — on-ramp with an easier problem first".
+- **level calibration** when the user stated no level (§3.3): PR #18's
+  maturity ladder (`new_user`/`starter`/`beginner`/`regular`/`advanced` by
+  solve count) is the deterministic input to the level guess, and its
+  `DIFFICULTY_MATCH` table (§7.6) bounds what difficulty the first window may
+  contain regardless of the stated level.
 - **day-0 diagnostics**: the first day of any plan ≥14 days includes 2–3
-  short probe tasks targeting the highest-uncertainty skills (where seeded
-  confidence is low), so the first regeneration corrects the assumed level —
-  cheap adaptive value on day one, no mastery model required.
+  short probe tasks targeting the highest-uncertainty skills (evidence tier
+  low/none), so the first regeneration corrects the assumed level — cheap
+  adaptive value on day one, no mastery model required.
 
 If no LeetCode account is synced, everything above degrades to priors and the
 ack nudges: "Connect LeetCode and I'll skip what you've already solved."
@@ -532,17 +580,25 @@ Port of `prep_skeleton`'s budget model, generalised:
   bonus) → capacity reservation derived from actual overlap.
 
 Priority scoring, deterministic and unit-testable (handoff §9.3 signals with
-concrete sources):
+concrete sources). The formula has two halves: the first two lines are the
+**evidence half** (this design's §5); every user-side term below them is
+implemented by a ported PR #18 component (§7.6) rather than new code:
 
 ```text
 priority(item) =
     Σ_targets [ target_weight × weighted_frequency × round_importance × trend ]
   × confidence
-  × user_gap(skill)            # 1 − seeded/observed mastery
-  × prerequisite_readiness
+  × pedagogical_need(item)     # PR #18 user-side composite, §7.6:
+                               #   topic weakness / need_score (topic_analysis)
+                               #   failed_attempt_score (incl. near_solve)
+                               #   revision_due_score (staleness step-decay)
+                               #   difficulty_match (maturity × difficulty table)
+                               #   freshness (recency of contact)
+  × prerequisite_readiness     # curriculum graph, §7.1 (planner-only)
   × coverage_bonus(shared targets)
-  − already_solved_penalty     # §6.2 three-way policy
-  − repetition_penalty         # same canonical item / same skill too recently
+  − already_solved_penalty     # §6.2 three-way policy (PR #18 components)
+  − repetition_penalty         # recently-shown / same-skill-too-recently
+                               # (PR #18 penalty + 90-day memory pattern)
 ```
 
 ### 7.3 Rolling execution window
@@ -552,6 +608,24 @@ and stable; days 4–7 soft-planned; beyond day 7 curriculum only.
 Materialisation selects top-priority eligible candidates per day slot under
 the minute budget, difficulty ramp (≤2 hard tasks consecutive), and modality
 mix from the blueprint.
+
+Eligibility and day composition adopt PR #18's hard-filter + soft-rerank
+split (§7.6):
+
+- **Guardrails (hard, pre-scoring):** categorical difficulty exclusion via
+  the maturity table (a `hard` problem is impossible for a `new_user`, not
+  merely down-ranked); anti-frustration (drop a retry candidate once
+  `failed_attempt_count > 5` with `near_solve_score < 0.5` — stop
+  re-scheduling what keeps hurting); solved problems eligible only as
+  revision tasks; repeat-memory (an item scheduled-and-skipped recently is
+  excluded for a cooldown period — the planner analogue of PR #18's 90-day
+  `previously_recommended` window, but keyed on *outcome*, see §7.6 fix F3);
+  per-day caps per task type (at most 1 retry, 1 revision per day by
+  default).
+- **Diversity (soft, post-scoring):** within a day, cap same-skill tasks at
+  2 and avoid a single-difficulty day — direct ports of PR #18's
+  `TOP_5_TOPIC_CAP` and `_avoid_same_difficulty_top5` passes, applied to the
+  day slate instead of a top-5 list.
 
 ### 7.4 LLM responsibilities (narrow, per handoff §12)
 
@@ -573,6 +647,93 @@ equivalent-canonical-repeat, available-days violation, locked-task overwrite,
 company-claim-without-evidence (V-10), wrong modality in round-specific
 plans, revision-before-exposure. Machine-readable errors drive targeted
 retry; two failures → `status=failed` + event, never a partial plan.
+
+### 7.6 Pedagogical scoring: reusing the PR #18 recommendation engine
+
+The planner's evidence layer answers *what the target companies ask*; PR
+#18's engine answers *what this user pedagogically needs next*. They are
+complementary by construction — the engine has zero company awareness, and
+the evidence layer has zero per-user mastery modelling — so the integration
+is a composition, not a merge.
+
+**What is ported (as-is, into `api/services/planner/pedagogy/`):** the pure
+module slice — `scoring_components.py`, `scorer.py`, `classifiers.py`,
+`type_decider.py`, `topic_analysis.py`, `guardrails.py`, `diversity.py`,
+`user_state.py`, the dataclass contracts from `models.py`, and `constants.py`
+— all stdlib-only, I/O-free, taking `now` as a parameter, with no tutor
+imports (verified: the dependency arrow is strictly tutor → recommendations).
+PR #18's own `docs/recommendation_import_inventory.md` independently
+identifies the same slice as the minimal reusable core.
+
+**What is not ported:** `repository.py` and `candidate_service.py` (the
+planner has its own data access, and the service binds to the curated-sheet
+pool), `sheet_validator.py` (sheet-specific), and the seven candidate
+generators as an *entry point* — the planner's candidate pool is the
+evidence-derived `evidence.canonical_items`, not `catalog.dsa_sheet_problems`.
+The generators' *conditions* (retry-ready, revision-stale, next-in-topic
+progression, similar-reinforcement) survive as task-type selection rules
+inside window materialisation.
+
+**How the two halves compose.** The worker builds one
+`UserRecommendationState`-shaped object per generation from the same tables
+PR #18 reads (`user_data.user_coding_problems`, `user_coding_submissions`)
+plus `user_skill_state`, then evaluates the §7.2 formula: evidence half from
+the signal tables, `pedagogical_need` from the ported components with the
+curated-sheet static columns replaced by planner-side equivalents —
+`importance_score` → normalised evidence `weighted_frequency`,
+`interview_frequency_score` → the target-cohort frequency itself (real report
+data instead of a hand-set constant), `progression_score`'s sheet-ordinal →
+position in the §7.1 prerequisite graph. The per-signal weights are re-tuned
+for the planner context and pinned by unit tests (see F2). Because both
+halves are pure functions over dataclasses, the composed scorer keeps the
+full per-task breakdown (`raw_scores`, `penalties`, `final_score`) that PR
+#18 persists for explainability — this lands in
+`prep_plan_tasks.evidence_jsonb` and powers "why this task?".
+
+**What the engine contributes beyond scoring:**
+
+- *Classifiers as adaptation vocabulary* (§12): maturity ladder, activity
+  states (`inactive_user`, `high_activity_user`, `sync_stale_user`), and
+  per-topic `need_type ∈ {weak, revision, neglected, progression}` become
+  the planner's regeneration signals.
+- *Sync-staleness honesty*: PR #18's `sync_stale_user` handling (penalise
+  history-derived recommendation types when LeetCode sync is stale or
+  failing) carries over — a window generated from stale history says so
+  instead of confidently scheduling around a phantom state.
+- *Determinism*: the engine has no randomness and total-orders every
+  tie-break; combined with the planner's own determinism this keeps
+  generation reproducible per `data_snapshot_version`.
+
+**Fixes required when porting (found in audit, cheap):**
+
+- **F1 — recency-count bug:** `_count_recent_attempts` sums a problem's
+  *lifetime* `attempt_count` when only its latest attempt falls in the
+  window, so one re-touched old problem can single-handedly trip
+  `high_activity_user`. The port counts submissions in-window from
+  `user_coding_submissions` instead.
+- **F2 — unpinned weights:** PR #18 has no unit test on `scorer.py` /
+  `scoring_components.py`; the exact weights and thresholds are unpinned.
+  The port adds golden tests for every constant table (weights,
+  `DIFFICULTY_MATCH`, staleness steps, weakness thresholds) before any
+  re-tuning.
+- **F3 — status-blind repeat memory:** PR #18's 90-day
+  `previously_recommended` exclusion ignores row status, so merely *proposed*
+  problems are blocked for 90 days. The planner's analogue keys cooldown on
+  outcome events (skipped/replaced), never on having been scheduled.
+- **F4 — packaging:** the package ships without `__init__.py`; the ported
+  copy gets one.
+- **F5 — shared constant:** the 0.65 "weak" threshold is duplicated in two
+  modules; the port hoists it into the constants module.
+
+**Coordination note.** PR #18 is unmerged (`mergeable_state: dirty`) and the
+tutor will keep using the same engine. To avoid divergence, the port should
+land as a shared package (`api/services/recommendations/` stays canonical;
+the planner imports the pure slice rather than copying it) once PR #18's
+rebase lands — until then the planner vendors the slice under
+`planner/pedagogy/` with a provenance header naming the source commit
+(`0813e46`). Either way, tutor and planner then share one definition of
+"what this user is weak at". This needs agreement with PR #18's author
+(open question §15.6).
 
 ---
 
@@ -727,6 +888,15 @@ making the streak row in the same panel truthful.
 - `user_skill_state` updates on task events with the handoff §18.3 rules
   (fail → down, hint → small up, independent → up, repeated fast success →
   ramp difficulty) — simple additive scoring, no forgetting-curve model yet.
+  One planner-only enrichment over PR #18's inputs: plan task events carry
+  `hinted`/`struggled`, which LeetCode history cannot see, so observed skill
+  state becomes richer than seeded state from the first completed task.
+- Window regeneration reads the PR #18 classifiers recomputed over fresh
+  state (§7.6): a skill flipping to `need_type=weak` pulls a repair task
+  into the next window; `revision`/`neglected` schedules a refresher;
+  `progression` unlocks the next difficulty tier (gated by its
+  `difficulty_progression_ready` failure-ratio checks); `sync_stale_user`
+  down-weights history-derived task types until sync recovers.
 - Window regeneration triggers: nightly roll, edits, constraint changes,
   "completed everything early" (pull one optional task forward — never
   auto-overload, per §18.1).
@@ -769,7 +939,11 @@ queryable without new infrastructure.
 3. Port pure modules (`prep_priors`, `prep_weighting`, `prep_skeleton`,
    `prep_validator`, `prep_topics`) into `api/services/planner/` with their
    tests; regenerate weighting SQL for Postgres.
-4. Migrations for §8 tables.
+4. Port the PR #18 pure slice into `planner/pedagogy/` with fixes F1–F5
+   (§7.6): golden tests pinning every constant table, in-window submission
+   counting, outcome-keyed repeat memory, `__init__.py`, hoisted weak
+   threshold. Agree the shared-package plan with the PR #18 author.
+5. Migrations for §8 tables.
 
 **P2 — Generation core**
 `PlanRequest` normaliser + routing (+ edge-case table §3.3 as parametrised
@@ -796,7 +970,7 @@ metrics dashboards, small-beta rollout.
 
 ## 15. Open questions for the founder
 
-1. Confirm D1–D4 (§0) — especially D2, since it reinterprets the handoff's
+1. Confirm D1–D5 (§0) — especially D2, since it reinterprets the handoff's
    "expanded plan surface" in favour of the repo's banned-concept stance.
 2. Multi-plan posture: keep unlimited active plans with a nudge at 3+, or
    cap at N? (Design assumes nudge-not-block.)
@@ -808,3 +982,8 @@ metrics dashboards, small-beta rollout.
    auth-gated? (Growth question, not an architecture one — both fit.)
 5. The ~200-item curated canonical seed list (§5.3) needs an owner — it is
    editorial work, not engineering.
+6. PR #18 sharing (§7.6): vendor the pure recommendation slice into the
+   planner now and converge on a shared package after PR #18's rebase lands,
+   or block P1-4 on landing PR #18 first? (Design assumes vendor-now,
+   converge-later; needs sign-off from PR #18's author since both branches
+   are unmerged and `dirty`.)
